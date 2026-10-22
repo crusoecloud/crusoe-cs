@@ -106,14 +106,82 @@ Per host, in order:
 | 4 | Understand the inventory | [Inventory](../../README.md#inventory) | How hosts and groups are discovered |
 
 Steps 1–3 are one-time. To confirm you are ready, run both of these
-inside the repo — the second exercises exactly what Ansible uses:
+inside the repo.
 
-```bash
-ansible-playbook --version          # virtualenv is active
-inventory/crusoe.py --list | head   # Crusoe CLI is authenticated
+**1. The virtualenv is active.**
+
+```console
+$ ansible-playbook --version
+ansible-playbook [core 2.20.2]
+  config file = <repo>/crusoe-cs-ansible/ansible.cfg
+  ...
+  executable location = <repo>/crusoe-cs-ansible/.venv/bin/ansible-playbook
+  python version = 3.14.x ...
 ```
 
-If the second command errors, the `crusoe` CLI is not installed or not
+Check two lines: `config file` must be the repo's `ansible.cfg` (otherwise
+Ansible won't find the inventory), and `executable location` must be inside
+the repo's `.venv/`. If it points elsewhere — e.g. `/opt/homebrew/bin/` — you
+are running a system Ansible, not the project's pinned one; run
+`direnv allow` in the repo (or `source .venv/bin/activate`) and check again.
+
+**2. The Crusoe CLI is authenticated** — this exercises exactly what Ansible
+uses:
+
+```console
+$ inventory/crusoe.py --list
+{
+  "_meta": {
+    "hostvars": {
+      "vm-example-1": {
+        "ansible_host": "203.0.113.10",
+        "crusoe_private_ip": "172.27.0.4",
+        "crusoe_public_ip": "203.0.113.10",
+        "crusoe_project": "8f21c0b4_1a2b_4c3d_9e8f_0123456789ab",
+        "crusoe_type": "c1a.2x",
+        "crusoe_location": "us-southcentral1-a",
+        "crusoe_nodepool": "",
+        "crusoe_cluster": "",
+        "crusoe_node_labels": {}
+      },
+      "vm-example-2": { ... }
+    }
+  },
+  "all": {
+    "hosts": ["vm-example-1", "vm-example-2"]
+  },
+  "project_8f21c0b4_1a2b_4c3d_9e8f_0123456789ab": {
+    "hosts": ["vm-example-1", "vm-example-2"]
+  },
+  "type_c1a": {
+    "hosts": ["vm-example-1", "vm-example-2"]
+  },
+  "region_us_southcentral1": {
+    "hosts": ["vm-example-1", "vm-example-2"]
+  }
+}
+```
+
+**Reading the output.** `_meta.hostvars` is per-host detail — not something
+you target. Every *other* top-level key is a **group name** you can pass as
+`target_hosts`. In the example above:
+
+| Group | Built from | Use it to target |
+|---|---|---|
+| `all` | — | Every VM in the account |
+| `project_8f21c0b4_…` | `crusoe_project` (dashes become `_`) | Every VM in that project |
+| `type_c1a` | `crusoe_type` with the size suffix dropped (`c1a.2x` → `c1a`) | Every VM of that instance family |
+| `region_us_southcentral1` | `crusoe_location` with the AZ dropped (`us-southcentral1-a` → `us_southcentral1`) | Every VM in that region |
+
+Hostnames (`vm-example-1`) work too, to target a single VM. These VMs have an
+empty `crusoe_nodepool` and `crusoe_cluster`, so no `nodepool_*` or `k8s_*`
+groups appear; Kubernetes nodes would add those. So, for example:
+
+```bash
+ansible-playbook playbooks/emudhra-ca/distrust-emudhra-roots.yml -e target_hosts=region_us_southcentral1
+```
+
+If the command errors, the `crusoe` CLI is not installed or not
 authenticated — revisit step 2. The inventory shells out to
 `crusoe compute vms list`, `crusoe kubernetes nodepools list`, and
 `crusoe kubernetes clusters list`, so your credentials need read access
@@ -128,7 +196,7 @@ to those resources.
 inventory = inventory/crusoe.py
 ```
 
-`inventory/crusoe.py` queries the Crusoe Cloud API through the `crusoe`
+[`inventory/crusoe.py`](../../inventory/crusoe.py) queries the Crusoe Cloud API through the `crusoe`
 CLI and builds groups automatically. **You do not write an inventory
 file** — you pass one of these generated group names (or a single
 hostname) as `target_hosts`:
@@ -164,8 +232,8 @@ ansible <group> -m ping
 
 `ansible -m ping` failing here is an SSH or credentials problem, not a
 playbook problem — fix it before continuing. Connections use
-`remote_user = ubuntu` from `ansible.cfg`; if your hosts sit behind a
-bastion, set `ansible_ssh_common_args` in `inventory/group_vars/all.yml`
+`remote_user = ubuntu` from [`ansible.cfg`](../../ansible.cfg); if your hosts sit behind a
+bastion, set `ansible_ssh_common_args` in [`inventory/group_vars/all.yml`](../../inventory/group_vars/all.yml)
 (there is a commented example in that file).
 
 ### Roll out gradually
@@ -255,18 +323,22 @@ ansible-playbook playbooks/emudhra-ca/distrust-emudhra-roots.yml \
 
 ## Testing
 
-- Docker e2e: `tests/e2e/emudhra-ca/run.sh all` — 8 scenarios × 5
-  images (Ubuntu 22.04/24.04, Rocky 9, Debian 12, AlmaLinux 9).
-- Real-VM e2e: `tests/e2e/emudhra-ca/vms.py test` — one VM per
-  latest-tagged Crusoe image; pristine VMs genuinely ship the
-  distrusted roots, so this exercises the real package-shipped case.
+Full details: [`tests/e2e/emudhra-ca/README.md`](../../tests/e2e/emudhra-ca/README.md).
+
+- Docker e2e ([`run.sh`](../../tests/e2e/emudhra-ca/run.sh)):
+  `tests/e2e/emudhra-ca/run.sh all` — 9 scenarios × 5 images (Ubuntu
+  22.04/24.04, Rocky 9, Debian 12, AlmaLinux 9).
+- Real-VM e2e ([`vms.py`](../../tests/e2e/emudhra-ca/vms.py)):
+  `tests/e2e/emudhra-ca/vms.py test` — one VM per latest-tagged Crusoe
+  image; pristine VMs genuinely ship the distrusted roots, so this
+  exercises the real package-shipped case.
 
 ## Sources
 
 - Advisory: <https://emudhra.we-have-a-problem.com/>
 - Machine-readable root list:
   [`roots.json`](https://emudhra.we-have-a-problem.com/roots.json)
-  (the fingerprints in `roles/emudhra_ca/vars/main.yml` are pinned
+  (the fingerprints in [`roles/emudhra_ca/vars/main.yml`](../../roles/emudhra_ca/vars/main.yml) are pinned
   verbatim from this file)
 - Distro corroboration: Ubuntu USN-8944-1, Debian DSA-6572-1, Rocky 9
   (c9s) `remove-*` patches

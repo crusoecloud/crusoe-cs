@@ -1,6 +1,49 @@
-# crusoe-cx-ansible
+# crusoe-cs-ansible
 
-Ansible playbooks and Helm charts for operating and diagnosing Crusoe Cloud Kubernetes nodes.
+Ansible playbooks from the Crusoe Cloud Support team for operating,
+remediating, and diagnosing hosts on Crusoe Cloud — VMs and Kubernetes nodes
+alike.
+
+Every playbook targets hosts from a shared dynamic inventory built from the
+Crusoe Cloud API, so there is no inventory file to maintain: set up the repo
+once, pick a host group, run a playbook.
+
+## Playbooks
+
+| Playbook | What it does | Docs |
+|---|---|---|
+| [eMudhra CA distrust](#emudhra-ca-distrust) | Removes root CAs chained to the compromised eMudhra intermediates | [README](playbooks/emudhra-ca/README.md) |
+| [NFS](#nfs) | Mounts, troubleshoots, and validates Crusoe shared disks | [README](playbooks/nfs/README.md) |
+| [Log collection](#log-collection) | Collects node logs for troubleshooting | [Playbook](playbooks/logs_collector.yml) |
+| [SSH key management](#ssh-key-management) | Adds or removes SSH authorized keys | [Playbook](playbooks/ssh_keys.yml) |
+
+### eMudhra CA distrust
+
+Removes the distrusted eMudhra root CAs from hosts' trust stores.
+
+📖 [`playbooks/emudhra-ca/README.md`](playbooks/emudhra-ca/README.md)
+
+### NFS
+
+Mounts and unmounts VAST NFS shared disks, works around IPv6 resolution
+issues, captures CSI mount diagnostics, and validates mounts from Kubernetes
+with the `nfs-test` Helm chart.
+
+📖 [`playbooks/nfs/README.md`](playbooks/nfs/README.md)
+
+### Log collection
+
+Collects kernel, journal, kubelet, containerd, and container logs from nodes
+and saves them to `logs/<node>/` locally.
+
+📄 [`playbooks/logs_collector.yml`](playbooks/logs_collector.yml)
+
+### SSH key management
+
+Adds or removes the SSH authorized keys defined in
+[`roles/ssh_keys/files/authorized_keys.yml`](roles/ssh_keys/files/authorized_keys.yml).
+
+📄 [`playbooks/ssh_keys.yml`](playbooks/ssh_keys.yml)
 
 ## Prerequisites
 
@@ -20,32 +63,14 @@ pip install --user pipenv
 brew install direnv
 echo 'eval "$(direnv hook zsh)"' >> ~/.zshrc && source ~/.zshrc
 
-# helm >= 4.0
-brew install helm
-
-# kubectl
-brew install kubectl
+# helm >= 4.0 and kubectl — only needed for Kubernetes playbooks
+brew install helm kubectl
 ```
-
-### Kubeconfig
-
-1. Log in to the [Crusoe Cloud console](https://console.crusoe.ai)
-2. Navigate to **Kubernetes** → select your cluster
-3. Click **Download kubeconfig** and save the file
-4. Point kubectl at it:
-
-```bash
-export KUBECONFIG=~/Downloads/<your-cluster>.kubeconfig
-
-# Verify connectivity
-kubectl get nodes
-```
-
-To make it permanent, add the `export KUBECONFIG=...` line to your `~/.zshrc`.
 
 ### Crusoe CLI
 
-The dynamic inventory (`inventory/crusoe.py`) requires the `crusoe` CLI to be installed and authenticated:
+The dynamic inventory (`inventory/crusoe.py`) requires the `crusoe` CLI to be
+installed and authenticated:
 
 ```bash
 brew install crusoecloud/tap/crusoe
@@ -59,113 +84,40 @@ crusoe auth login
 direnv allow
 ```
 
-Bootstrap installs the pinned Python version (3.14), creates the virtualenv, installs Ansible + dependencies, and installs the `kubernetes.core` collection. direnv activates the virtualenv and adds `scripts/` to `PATH` whenever you enter the repo.
-
-## Playbooks
-
-All remote playbooks require `-e target_hosts=<group>`. Omitting it will fail with a clear error.
-
-### eMudhra SCA distrusted roots
-
-Removes the four root CAs chained to the compromised eMudhra intermediates
-(advisory: <https://emudhra.we-have-a-problem.com/>) from Debian- and
-RedHat-family hosts. Detection is by exact SHA-256 fingerprint; only
-affected hosts are remediated — clean hosts report zero changes.
-
-📖 **Customer-facing runbook:
-[`playbooks/emudhra-ca/README.md`](playbooks/emudhra-ca/README.md)** —
-prerequisites, inventory setup, staged rollout, what is and is not in
-scope, and the full variable reference.
-
-```bash
-# Remediate the fleet
-ansible-playbook playbooks/emudhra-ca/distrust-emudhra-roots.yml -e target_hosts=<group>
-
-# Skip the live s_client canary check (hosts without egress)
-ansible-playbook playbooks/emudhra-ca/distrust-emudhra-roots.yml \
-  -e target_hosts=<group> -e emudhra_ca_run_connectivity_check=false
-```
-
-E2E tests (Docker containers, all four roots, five distros):
-`tests/e2e/emudhra-ca/run.sh all` — see `tests/e2e/emudhra-ca/README.md`. The build-time cert
-check (`tests/e2e/emudhra-ca/check-certs.sh`) asserts every shipped root PEM hashes to
-its pinned fingerprint.
-
-### NFS
-
-```bash
-# Install VAST NFS driver and mount volumes
-ansible-playbook playbooks/nfs/nfs_mount.yml -e target_hosts=<group>
-
-# Unmount volumes
-ansible-playbook playbooks/nfs/nfs_unmount.yml -e target_hosts=<group>
-
-# Fix IPv6 precedence (workaround for bogus AAAA records)
-ansible-playbook playbooks/nfs/fix_ipv6_precedence.yml -e target_hosts=<group>
-```
-
-`nfs_mount.yml` defaults to DNS mode (`remoteports=dns`). Switch to IPv4:
-
-```bash
-ansible-playbook playbooks/nfs/nfs_mount.yml -e "target_hosts=<group> nfs_mode=ip"
-```
-
-### Kubernetes NFS test
-
-Deploys the `nfs-test` Helm chart, waits for all pods to reach Running, and prints probe logs. Runs locally against your kubeconfig.
-
-```bash
-# DNS mode (default)
-ansible-playbook playbooks/nfs/nfs_k8s_test.yml
-
-# IPv4 mode
-ansible-playbook playbooks/nfs/nfs_k8s_test.yml -e nfs_mode=ipv4
-
-# Tear down
-ansible-playbook playbooks/nfs/nfs_k8s_test.yml -e uninstall=true
-```
-
-### Log collection
-
-Collects kernel, journal, kubelet, containerd, and container logs from remote nodes and saves them to `logs/<node>/` locally.
-
-```bash
-ansible-playbook playbooks/log_collect.yml -e target_hosts=<group>
-
-# Specific nodes
-ansible-playbook playbooks/log_collect.yml -e target_hosts=<group> -l "node1,node2"
-
-# Custom time window
-ansible-playbook playbooks/log_collect.yml -e "target_hosts=<group> since=2026-05-13T00:00:00"
-```
-
-## Helm chart: nfs-test
-
-Located at `charts/nfs-test/`. Deploys:
-
-- **DaemonSet** — one pod per node; writes and reads a probe file on each NFS volume to validate per-node mount health
-- **Deployment** — 2 replicas spread across distinct nodes via `topologySpreadConstraints`; validates RWX multi-attach as a real app would use it
-
-Key values:
-
-| Value | Default | Description |
-|---|---|---|
-| `nfsServer` | `nfs.crusoecloudcompute.com` | NFS server address (IP or hostname) |
-| `nfsMountOptions` | `vers=3,nconnect=16,spread_reads,spread_writes,remoteports=dns` | Mount options passed to every PV |
-| `volumes` | `disk-a`, `disk-b` (placeholder `nfsPath`s — set your own volume UUIDs) | NFS volumes to mount and test |
-| `nodeSelector` | `{}` | Restrict to a specific node pool |
-| `deployment.enabled` | `true` | Toggle the app-validation Deployment |
-| `deployment.replicas` | `2` | Number of Deployment replicas |
+Bootstrap installs the pinned Python version (3.14), creates the virtualenv,
+installs Ansible + dependencies, and installs the required collections. direnv
+activates the virtualenv and adds `scripts/` to `PATH` whenever you enter the
+repo.
 
 ## Inventory
 
-`inventory/crusoe.py` is a dynamic inventory plugin that queries the Crusoe Cloud API via the `crusoe` CLI. Results are cached for 120 seconds.
+`inventory/crusoe.py` is a dynamic inventory that queries the Crusoe Cloud API
+via the `crusoe` CLI and builds these groups, which you pass to playbooks as
+`-e target_hosts=<group>` (or pass a single hostname):
 
-## Scripts
+| Group pattern | Example | Contains |
+|---|---|---|
+| `all` | `all` | Every VM in your account |
+| `project_<project_id>` | `project_8f21c0b4_…` | All VMs in one project (the project **ID**, not its display name) |
+| `type_<instance_type>` | `type_c1a` | All VMs of one instance type |
+| `region_<region>` | `region_us_east1` | All VMs in a region (AZ suffix stripped) |
+| `nodepool_<nodepool>` | `nodepool_gpu_workers` | Kubernetes nodes in one nodepool |
+| `k8s_<cluster>` | `k8s_prod_cluster` | All Kubernetes nodes in one cluster |
 
-| Script | Description |
+## Repository layout
+
+| Path | What it is |
 |---|---|
-| `scripts/bootstrap.sh` | One-time project setup |
-| `scripts/anssh <host>` | SSH into a node by its Ansible inventory name |
+| [`playbooks/`](playbooks/) | Playbooks — larger ones live in their own directory with a README |
+| [`roles/`](roles/) | Roles backing the playbooks |
+| [`inventory/`](inventory/) | Dynamic Crusoe Cloud inventory and `group_vars` |
+| [`charts/`](charts/) | Helm charts used by Kubernetes playbooks |
+| [`tests/`](tests/) | Inventory unit tests and per-playbook e2e suites |
+| [`scripts/`](scripts/) | `bootstrap.sh` (one-time setup) and `anssh <host>` (SSH to a node by inventory name) |
 
-`anssh` is available in your shell whenever you're inside the repo (via direnv `PATH_add`). It resolves `ansible_host` from the inventory and connects as `ubuntu`.
+## Adding a playbook
+
+1. Put it under `playbooks/` — give it its own directory and `README.md` if it
+   needs more than a few lines of documentation.
+2. Add a row to the [Playbooks](#playbooks) table and a short section linking
+   to it.

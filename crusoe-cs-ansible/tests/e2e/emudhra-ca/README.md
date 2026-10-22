@@ -26,7 +26,9 @@ tests/e2e/emudhra-ca/run.sh all --images ubuntu:22.04,ubuntu:24.04,rockylinux:9,
 
 Target images are derived from stock distro images with python3 (Ansible
 modules need an interpreter) and trust-store tooling baked in — see
-`images/Dockerfile.ubuntu` / `images/Dockerfile.alpine`. They build once and
+[`images/Dockerfile.debian`](images/Dockerfile.debian) /
+[`images/Dockerfile.redhat`](images/Dockerfile.redhat) /
+[`images/Dockerfile.alpine`](images/Dockerfile.alpine). They build once and
 are cached by Docker.
 
 ## Scenarios
@@ -63,18 +65,18 @@ bindings for any Python new enough for ansible-core 2.20 modules (verified
 against Rocky 8's actual repos), so the `package` module cannot run there —
 the constraint is ansible-core's, not the role's. The role's logic is
 family-generic and proven on EL9; real EL8 hosts that meet the interpreter
-pre-flight (`roles/emudhra_ca/tasks/preflight.yml`) remediate the same way.
+pre-flight ([`roles/emudhra_ca/tasks/preflight.yml`](../../../roles/emudhra_ca/tasks/preflight.yml)) remediate the same way.
 You can still run it explicitly with `--images rockylinux:8` if your
 controller runs an older ansible-core that supports EL8's Python.
 
 ## VM harness
 
-A second harness, `vms.py`, runs the same scenarios against **real Crusoe
+A second harness, [`vms.py`](vms.py), runs the same scenarios against **real Crusoe
 VMs** — one per latest-tagged x86_64 VM image — instead of containers. It
 discovers every `latest` image (`crusoe compute images list`), creates one
 small VM per image (round-robin across regions, capacity fallback), and
 drives the scenarios over SSH via the repo's dynamic inventory
-(`inventory/crusoe.py`). arm64 images are excluded — the catalog has no
+([`inventory/crusoe.py`](../../../inventory/crusoe.py)). arm64 images are excluded — the catalog has no
 arm64 CPU type.
 
 Because every `latest` image predates the advisory, pristine VMs genuinely
