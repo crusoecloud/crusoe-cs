@@ -1,0 +1,22 @@
+---
+- name: Load authorized key definitions
+  ansible.builtin.set_fact:
+    ssh_keys_all: "{{ lookup('file', role_path + '/files/authorized_keys.yml') | from_yaml }}"
+
+- name: Filter keys by ssh_users (if specified)
+  ansible.builtin.set_fact:
+    ssh_keys_to_apply: >-
+      {{
+        ssh_keys_all.ssh_authorized_keys
+        if ssh_users is not defined
+        else ssh_keys_all.ssh_authorized_keys | selectattr('username', 'in', ssh_users.split(',') if ssh_users is string else ssh_users) | list
+      }}
+
+- name: Manage SSH authorized keys
+  ansible.posix.authorized_key:
+    user: "{{ ansible_user }}"
+    key: "{{ item.pub_key }}"
+    state: "{{ state | default('present') }}"
+  loop: "{{ ssh_keys_to_apply }}"
+  loop_control:
+    label: "{{ item.username }}"

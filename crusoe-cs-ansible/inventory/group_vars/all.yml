@@ -1,0 +1,2 @@
+# SSH connection vars — override per group if bastion is needed:
+# ansible_ssh_common_args: "-A -J user@bastion-host"

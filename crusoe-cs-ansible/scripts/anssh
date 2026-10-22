@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# SSH into an Ansible inventory host by name.
+# Usage: anssh <inventory-hostname> [ssh-args...]
+set -euo pipefail
+
+if [[ $# -eq 0 ]]; then
+  echo "Usage: anssh <inventory-hostname> [ssh-args...]" >&2
+  exit 1
+fi
+
+host="$1"; shift
+ip=$(ansible-inventory --host "$host" 2>/dev/null \
+  | python3 -c "import sys,json; print(json.load(sys.stdin)['ansible_host'])" 2>/dev/null)
+
+if [[ -z "$ip" ]]; then
+  echo "anssh: could not resolve ansible_host for '$host'" >&2
+  exit 1
+fi
+
+exec ssh "ubuntu@$ip" "$@"

@@ -1,0 +1,128 @@
+---
+# Collect diagnostics from target nodes and save to ./logs/<node>/ locally.
+# Usage:
+#   ansible-playbook playbooks/log_collect.yml -e target_hosts=<group>
+#   ansible-playbook playbooks/log_collect.yml -e "target_hosts=<group> since=2026-05-13T00:00:00"
+#   ansible-playbook playbooks/log_collect.yml -e target_hosts=<group> -l "node1,node2"
+- name: Collect node diagnostics
+  hosts: "{{ target_hosts | mandatory('Required: -e target_hosts=<group_or_host>') }}"
+  become: true
+  gather_facts: true
+
+  vars:
+    since: "24h ago"
+    diag_dir: "/tmp/node-diag-{{ inventory_hostname }}"
+    local_dest: "{{ playbook_dir }}/../logs/{{ inventory_hostname }}"
+
+  tasks:
+    - name: Create diagnostics staging directory
+      ansible.builtin.file:
+        path: "{{ diag_dir }}"
+        state: directory
+        mode: "0755"
+
+    - name: Collect dmesg (JSON)
+      ansible.builtin.shell:
+        cmd: journalctl -k -o json --no-pager > "{{ diag_dir }}/dmesg.json"
+      changed_when: true
+
+    - name: Collect kernel journal since {{ since }}
+      ansible.builtin.shell:
+        cmd: journalctl -k --no-pager --since="{{ since }}" > "{{ diag_dir }}/kernel.log"
+      changed_when: true
+
+    - name: Collect full journal since {{ since }}
+      ansible.builtin.shell:
+        cmd: journalctl --no-pager --since="{{ since }}" > "{{ diag_dir }}/journal.log"
+      changed_when: true
+
+    - name: Collect kubelet logs since {{ since }}
+      ansible.builtin.shell:
+        cmd: journalctl -u kubelet --no-pager --since="{{ since }}" > "{{ diag_dir }}/kubelet.log"
+      changed_when: true
+
+    - name: Collect containerd logs since {{ since }}
+      ansible.builtin.shell:
+        cmd: journalctl -u containerd --no-pager --since="{{ since }}" > "{{ diag_dir }}/containerd.log"
+      changed_when: true
+
+    - name: Collect container logs via crictl
+      ansible.builtin.shell:
+        cmd: |
+          mkdir -p "{{ diag_dir }}/containers"
+          crictl ps -a --output json 2>/dev/null | python3 -c "
+          import sys, json, subprocess, os
+          data = json.load(sys.stdin)
+          for c in data.get('containers', []):
+              cid  = c['id']
+              name = c.get('metadata', {}).get('name', cid[:12])
+              pod  = c.get('labels', {}).get('io.kubernetes.pod.name', 'unknown-pod')
+              out  = os.path.join('{{ diag_dir }}', 'containers', f'{pod}__{name}.log')
+              with open(out, 'w') as f:
+                  subprocess.run(['crictl', 'logs', '--since', '24h', cid],
+                                 stdout=f, stderr=subprocess.STDOUT)
+          "
+      changed_when: true
+
+    - name: Collect storage state
+      ansible.builtin.shell:
+        cmd: |
+          {
+          echo "=== vastnfs-ctl status ==="
+          vastnfs-ctl status 2>&1 || echo "(vastnfs-ctl not found or failed)"
+          echo ""
+          echo "=== lsmod vast ==="
+          lsmod | grep -i vast || echo "(no vast modules)"
+          echo ""
+          echo "=== mount | grep nfs ==="
+          mount | grep nfs || echo "(no nfs mounts)"
+          echo ""
+          echo "=== findmnt -t nfs ==="
+          findmnt -t nfs || echo "(none)"
+          echo ""
+          echo "=== /etc/fstab ==="
+          cat /etc/fstab
+          echo ""
+          echo "=== uname -a ==="
+          uname -a
+          echo ""
+          echo "=== /etc/os-release ==="
+          cat /etc/os-release
+          } > "{{ diag_dir }}/storage-state.log"
+      changed_when: true
+
+    - name: Find collected log files
+      ansible.builtin.find:
+        paths: "{{ diag_dir }}"
+        patterns: "*.log,*.json"
+        recurse: false
+      register: diag_files
+
+    - name: Find container log files
+      ansible.builtin.find:
+        paths: "{{ diag_dir }}/containers"
+        patterns: "*.log"
+      register: container_files
+
+    - name: Fetch logs to local machine
+      ansible.builtin.fetch:
+        src: "{{ item.path }}"
+        dest: "{{ local_dest }}/{{ item.path | basename }}"
+        flat: true
+      loop: "{{ diag_files.files }}"
+      loop_control:
+        label: "{{ item.path | basename }}"
+
+    - name: Fetch container logs to local machine
+      ansible.builtin.fetch:
+        src: "{{ item.path }}"
+        dest: "{{ local_dest }}/containers/{{ item.path | basename }}"
+        flat: true
+      loop: "{{ container_files.files }}"
+      loop_control:
+        label: "{{ item.path | basename }}"
+
+    - name: Remove staging directory from host
+      ansible.builtin.file:
+        path: "{{ diag_dir }}"
+        state: absent

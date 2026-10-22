@@ -1,0 +1,47 @@
+# -- IPv4 mode: point at a single VIP and list the full VIP range in remoteports.
+# nfsServer: "<your-nfs-vip>"
+# nfsMountOptions:
+#   - vers=3
+#   - nconnect=16
+#   - spread_reads
+#   - spread_writes
+#   - remoteports=<your-vip-range>
+
+# -- DNS mode: point at the cluster DNS name; VAST handles load-balancing.
+# Requires VAST NFS driver (vastnfs) on each node.
+nfsServer: "nfs.crusoecloudcompute.com"
+nfsMountOptions:
+  - vers=3
+  - nconnect=16
+  - spread_reads
+  - spread_writes
+  - remoteports=dns
+
+# -- Volumes to mount and test. nfsPath is your volume's path on the NFS
+# server (find it in the Crusoe console under your shared disk). Replace
+# the placeholders with your own volume UUIDs.
+volumes:
+  - name: disk-a
+    nfsPath: /volumes/<your-volume-uuid>
+    mountPath: /mnt/disk-a
+    # Capacity is informational for NFS; does not enforce quota.
+    size: 100Gi
+  - name: disk-b
+    nfsPath: /volumes/<your-volume-uuid>
+    mountPath: /mnt/disk-b
+    size: 100Gi
+
+# Restrict to specific nodes (e.g. the k8s nodepool).
+# Leave empty to run on all nodes.
+nodeSelector: {}
+#  node-role.kubernetes.io/worker: ""
+
+tolerations: []
+
+image: ubuntu:24.04
+
+deployment:
+  enabled: true
+  # Spread replicas across distinct nodes via topologySpreadConstraints.
+  # Set to at least the number of nodes you want to validate.
+  replicas: 2

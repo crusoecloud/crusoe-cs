@@ -1,0 +1,59 @@
+# ============================================================
+# Crusoe CS Ansible — CI/CD Pipeline
+# ============================================================
+# Validates all YAML and Ansible content on every MR and push
+# to main. Extend with 'test' and 'deploy' stages as the repo
+# grows.
+# ============================================================
+
+stages:
+  - validate
+
+# ------------------------------------------------------------------
+# Reusable rule sets
+# ------------------------------------------------------------------
+# Run on merge requests and direct pushes to main.
+.rules-mr-and-main:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+# ------------------------------------------------------------------
+# yaml-lint
+# ------------------------------------------------------------------
+# Lints every YAML file in the repository for syntax and formatting
+# issues. Runs before ansible-lint so formatting problems are caught
+# first. Uses pipelinecomponents/yamllint — a minimal image that
+# ships yamllint with no extra setup required.
+yaml-lint:
+  stage: validate
+  image: pipelinecomponents/yamllint:latest
+  extends: .rules-mr-and-main
+  script:
+    # Lint all YAML files; a .yamllint config at the repo root
+    # can be used to tune rules (line length, truthy values, etc.)
+    - yamllint .
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+# ------------------------------------------------------------------
+# ansible-lint
+# ------------------------------------------------------------------
+# Enforces Ansible best practices across all playbooks and roles.
+# Uses pipelinecomponents/ansible-lint — ships ansible-lint and its
+# Ansible dependencies pre-installed.
+# A .ansible-lint config file at the repo root controls which rules
+# are enabled/skipped without touching this job definition.
+ansible-lint:
+  stage: validate
+  image: pipelinecomponents/ansible-lint:latest
+  extends: .rules-mr-and-main
+  script:
+    # ansible-lint auto-discovers playbooks and roles; pass '.'
+    # to scan the entire repository. Add '--profile production'
+    # once the codebase is mature enough for stricter checks.
+    - ansible-lint .
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH

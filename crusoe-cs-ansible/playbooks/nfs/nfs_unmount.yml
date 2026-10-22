@@ -1,0 +1,17 @@
+---
+# Usage: ansible-playbook playbooks/nfs/nfs_unmount.yml -e target_hosts=<group>
+- name: Unmount Crusoe NFS volumes
+  hosts: "{{ target_hosts | mandatory('Required: -e target_hosts=<group_or_host>') }}"
+  become: true
+
+  vars:
+    nfs_mounts:
+      - /mnt/disk-a
+      - /mnt/disk-b
+
+  tasks:
+    - name: Unmount NFS volumes
+      ansible.posix.mount:
+        path: "{{ item }}"
+        state: absent
+      loop: "{{ nfs_mounts }}"

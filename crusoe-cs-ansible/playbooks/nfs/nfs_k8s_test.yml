@@ -1,0 +1,104 @@
+---
+# Deploy the nfs-test DaemonSet via Helm and verify all pods reach Running state.
+# Usage:
+#   ansible-playbook playbooks/test_nfs_k8s.yml                        # DNS mode (default)
+#   ansible-playbook playbooks/test_nfs_k8s.yml -e nfs_mode=ipv4       # IPv4 mode
+#   ansible-playbook playbooks/test_nfs_k8s.yml -e "k8s_namespace=nfs-test helm_release=nfs-test"
+#   ansible-playbook playbooks/test_nfs_k8s.yml -e "uninstall=true"    # tear down
+- name: Test NFS mounts from k8s (Helm)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    helm_release: nfs-test
+    k8s_namespace: default
+    chart_path: "{{ playbook_dir }}/../charts/nfs-test"
+    uninstall: false
+    wait_timeout: "5m0s"
+    nfs_mode: dns   # dns | ipv4
+
+    # Environment-driven defaults (override with -e):
+    nfs_server_dns: "{{ lookup('env', 'NFS_SERVER_DNS') | default('nfs.crusoecloudcompute.com', true) }}"
+    nfs_server_ip: "{{ lookup('env', 'NFS_SERVER_IP') }}"
+    nfs_vip_range: "{{ lookup('env', 'NFS_VIP_RANGE') }}"
+
+    _nfs_mode_values:
+      dns:
+        nfsServer: "{{ nfs_server_dns }}"
+        nfsMountOptions:
+          - vers=3
+          - nconnect=16
+          - spread_reads
+          - spread_writes
+          - remoteports=dns
+      ipv4:
+        nfsServer: "{{ nfs_server_ip }}"
+        nfsMountOptions:
+          - vers=3
+          - nconnect=16
+          - spread_reads
+          - spread_writes
+          - remoteports={{ nfs_vip_range }}
+
+  tasks:
+    - name: Uninstall Helm release
+      kubernetes.core.helm:
+        name: "{{ helm_release }}"
+        release_namespace: "{{ k8s_namespace }}"
+        state: absent
+      when: uninstall | bool
+
+    - name: Install / upgrade nfs-test chart ({{ nfs_mode }} mode)
+      kubernetes.core.helm:
+        name: "{{ helm_release }}"
+        chart_ref: "{{ chart_path }}"
+        release_namespace: "{{ k8s_namespace }}"
+        create_namespace: true
+        wait: true
+        wait_timeout: "{{ wait_timeout }}"
+        values: "{{ _nfs_mode_values[nfs_mode] }}"
+        state: present
+      register: helm_result
+      when: not (uninstall | bool)
+
+    - name: Show Helm output
+      ansible.builtin.debug:
+        msg: "{{ helm_result.status }}"
+      when: not (uninstall | bool)
+
+    - name: Check DaemonSet pod status
+      kubernetes.core.k8s_info:
+        kind: Pod
+        namespace: "{{ k8s_namespace }}"
+        label_selectors:
+          - "app={{ helm_release }}"
+      register: pod_status
+      when: not (uninstall | bool)
+
+    - name: Show pod status
+      ansible.builtin.debug:
+        msg: "{{ item.metadata.name }} | {{ item.status.phase }} | node={{ item.spec.nodeName }}"
+      loop: "{{ pod_status.resources }}"
+      loop_control:
+        label: "{{ item.metadata.name }}"
+      when: not (uninstall | bool)
+
+    - name: Fetch probe logs from each pod
+      kubernetes.core.k8s_log:
+        name: "{{ item.metadata.name }}"
+        namespace: "{{ k8s_namespace }}"
+        container: nfs-test
+      register: probe_logs
+      loop: "{{ pod_status.resources }}"
+      loop_control:
+        label: "{{ item.metadata.name }}"
+      when: not (uninstall | bool)
+
+    - name: Show probe logs
+      ansible.builtin.debug:
+        msg: "{{ item.log.splitlines() }}"
+      loop: "{{ probe_logs.results }}"
+      loop_control:
+        label: "{{ item.item.metadata.name }}"
+      when: not (uninstall | bool)

@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+VENV="${PWD}/.venv/bin"
+YAMLLINT="${VENV}/yamllint"
+ANSIBLE_LINT="${VENV}/ansible-lint"
+
+echo "→ yamllint"
+find . -path './.venv' -prune -o \( -name '*.yml' -o -name '*.yaml' \) -print \
+  | xargs "${YAMLLINT}"
+
+echo "→ ansible-lint"
+"${ANSIBLE_LINT}" .

@@ -1,0 +1,6 @@
+apiVersion: v2
+name: nfs-test
+description: Verify shared NFS disk mounts are accessible from k8s pods
+type: application
+version: 0.1.0
+appVersion: "1.0"

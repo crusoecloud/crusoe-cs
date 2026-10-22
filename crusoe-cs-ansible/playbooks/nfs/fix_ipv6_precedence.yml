@@ -1,0 +1,50 @@
+---
+# Usage: ansible-playbook playbooks/nfs/fix_ipv6_precedence.yml -e target_hosts=<group>
+#
+# The NFS hostname and its VIPs are parameterized — nothing
+# environment-specific is hardcoded. Override with -e or group_vars:
+#   -e "nfs_hostname=nfs.example.com nfs_vips=[10.0.0.1, 10.0.0.2]"
+# NFS_HOSTNAME / NFS_VIPS (comma-separated) from the environment are
+# used as defaults when set.
+- name: Prefer IPv4 over IPv6 for address resolution
+  hosts: "{{ target_hosts | mandatory('Required: -e target_hosts=<group_or_host>') }}"
+  become: true
+
+  vars:
+    nfs_hostname: "{{ lookup('env', 'NFS_HOSTNAME') | default('nfs.crusoecloudcompute.com', true) }}"
+    nfs_vips: "{{ (lookup('env', 'NFS_VIPS') | default('', true)).split(',') | select | list }}"
+
+  tasks:
+    - name: Fail with guidance when no VIPs are configured
+      ansible.builtin.fail:
+        msg: >-
+          nfs_vips is empty. Supply the NFS VIPs to pin, e.g.
+          -e 'nfs_vips=["10.0.0.1", "10.0.0.2"]' (or set NFS_VIPS in the
+          environment as a comma-separated list).
+      when: nfs_vips | length == 0
+
+    - name: Set IPv4 precedence over IPv6 in gai.conf
+      ansible.builtin.lineinfile:
+        path: /etc/gai.conf
+        line: "precedence ::ffff:0:0/96  100"
+        create: true
+
+    - name: "Pin all NFS IPs to hostname in /etc/hosts (bypasses bogus :: AAAA record)"
+      ansible.builtin.blockinfile:
+        path: /etc/hosts
+        marker: "# {mark} ANSIBLE MANAGED - {{ nfs_hostname }}"
+        block: |
+          {% for vip in nfs_vips %}
+          ::ffff:{{ vip }} {{ nfs_hostname }}
+          {{ vip }} {{ nfs_hostname }}
+          {% endfor %}
+
+    - name: Verify getent resolves NFS hostname to IPv4
+      ansible.builtin.command:
+        cmd: "getent hosts {{ nfs_hostname }}"
+      register: getent_result
+      changed_when: false
+
+    - name: Show resolution result
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }}: {{ getent_result.stdout }}"

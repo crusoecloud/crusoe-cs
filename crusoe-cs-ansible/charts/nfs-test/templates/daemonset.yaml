@@ -1,0 +1,56 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ .Release.Name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version }}
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+spec:
+  selector:
+    matchLabels:
+      app: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app: {{ .Release.Name }}
+    spec:
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      terminationGracePeriodSeconds: 0
+      containers:
+        - name: nfs-test
+          image: {{ .Values.image }}
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          command:
+            - /bin/bash
+            - -c
+            - |
+              set -euo pipefail
+              {{- range .Values.volumes }}
+              echo "$(date -u +%FT%TZ) ${NODE_NAME}" > {{ .mountPath }}/probe-${NODE_NAME}.txt
+              read_back=$(cat {{ .mountPath }}/probe-${NODE_NAME}.txt)
+              echo "[OK] {{ .name }} on ${NODE_NAME}: ${read_back}"
+              {{- end }}
+              exec sleep infinity
+          volumeMounts:
+            {{- range .Values.volumes }}
+            - name: {{ .name }}
+              mountPath: {{ .mountPath }}
+            {{- end }}
+      volumes:
+        {{- range .Values.volumes }}
+        - name: {{ .name }}
+          persistentVolumeClaim:
+            claimName: {{ $.Release.Name }}-{{ .name }}
+        {{- end }}

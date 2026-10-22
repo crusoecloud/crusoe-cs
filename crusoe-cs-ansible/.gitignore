@@ -1,0 +1,13 @@
+inventory/group_vars/*
+!inventory/group_vars/.gitkeep
+inventory/host_vars/*
+!inventory/host_vars/.gitkeep
+.venv/
+.direnv/
+venv_temp/
+.cache/
+__pycache__/
+*.pyc
+*.retry
+logs/
+.worktrees/

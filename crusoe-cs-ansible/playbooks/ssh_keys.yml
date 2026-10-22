@@ -1,0 +1,29 @@
+# Usage: ansible-playbook playbooks/ssh_keys.yml -e target_hosts=<group>
+#
+# Variables:
+#   target_hosts  (required) — inventory host or group
+#   state         (optional, default: present) — present | absent
+#   ssh_users     (optional) — comma-separated usernames to act on; omit for all
+#
+# Examples:
+#   Add all keys:
+#     ansible-playbook playbooks/ssh_keys.yml -e target_hosts=gpu-nodes
+#
+#   Add only alice's key:
+#     ansible-playbook playbooks/ssh_keys.yml -e target_hosts=gpu-nodes \
+#       -e ssh_users=alice
+#
+#   Remove bob's key:
+#     ansible-playbook playbooks/ssh_keys.yml -e target_hosts=gpu-nodes \
+#       -e ssh_users=bob -e state=absent
+#
+#   Remove multiple keys:
+#     ansible-playbook playbooks/ssh_keys.yml -e target_hosts=gpu-nodes \
+#       -e ssh_users=alice,bob -e state=absent
+---
+- name: Manage SSH authorized keys
+  hosts: "{{ target_hosts | mandatory('Required: -e target_hosts=<group_or_host>') }}"
+  become: true
+
+  roles:
+    - ssh_keys

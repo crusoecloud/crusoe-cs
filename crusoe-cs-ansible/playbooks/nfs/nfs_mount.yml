@@ -1,0 +1,108 @@
+---
+# Usage: ansible-playbook playbooks/nfs/nfs_mount.yml -e target_hosts=<group>
+#
+# All NFS values are parameterized — nothing environment-specific is
+# hardcoded. Override any of them with -e or a group_vars file:
+#   -e "nfs_server_ip=10.0.0.1 nfs_vip_range=10.0.0.1-10.0.0.4"
+#   -e "nfs_mounts=[{src: 'server:/volumes/<uuid>', path: '/mnt/disk-a'}]"
+# NFS_SERVER_IP / NFS_VIP_RANGE / NFS_SERVER_DNS from the environment
+# are used as defaults when set.
+- name: Install VAST NFS driver and mount Crusoe shared disks
+  hosts: "{{ target_hosts | mandatory('Required: -e target_hosts=<group_or_host>') }}"
+  become: true
+
+  vars:
+    # Set nfs_mode to "ip" (default, reliable) or "dns" (uses remoteports=dns)
+    nfs_mode: ip
+
+    # Environment-driven defaults (override with -e or group_vars):
+    nfs_server_ip: "{{ lookup('env', 'NFS_SERVER_IP') }}"
+    nfs_vip_range: "{{ lookup('env', 'NFS_VIP_RANGE') }}"
+    nfs_server_dns: "{{ lookup('env', 'NFS_SERVER_DNS') | default('nfs.crusoecloudcompute.com', true) }}"
+
+    nfs_opts_ip: "vers=3,nconnect=16,spread_reads,spread_writes,remoteports={{ nfs_vip_range }}"
+    nfs_opts_dns: vers=3,nconnect=16,spread_reads,spread_writes,remoteports=dns
+
+    nfs_server: "{{ nfs_server_ip if nfs_mode == 'ip' else nfs_server_dns }}"
+    nfs_opts: "{{ nfs_opts_ip if nfs_mode == 'ip' else nfs_opts_dns }}"
+
+    nfs_installer_url: https://github.com/crusoecloud/crusoe-nfs-support/raw/refs/heads/main/crusoe_shared_disks_nfs_setup.py
+    nfs_installer_dest: /tmp/crusoe_shared_disks_nfs_setup.py
+    # Mounts are caller-supplied — there is no environment-specific default.
+    # Example:
+    #   nfs_mounts:
+    #     - src: "{{ nfs_server }}:/volumes/<your-volume-uuid>"
+    #       path: /mnt/disk-a
+    nfs_mounts: []
+
+  tasks:
+    - name: Fail with guidance when no mounts are configured
+      ansible.builtin.fail:
+        msg: >-
+          nfs_mounts is empty. Supply your volume mounts, e.g.
+          -e 'nfs_mounts=[{src: "{{ nfs_server }}:/volumes/<uuid>", path: "/mnt/disk-a"}]'
+          (or set them in group_vars).
+      when: nfs_mounts | length == 0
+
+    - name: Fail with guidance when the NFS server is not configured
+      ansible.builtin.fail:
+        msg: >-
+          nfs_server resolved empty. Set nfs_server_ip (or NFS_SERVER_IP in the
+          environment), or use nfs_mode=dns with nfs_server_dns.
+      when: nfs_server | length == 0
+    - name: Check if VAST NFS driver is installed
+      ansible.builtin.command: vastnfs-ctl status
+      register: vastnfs_status
+      changed_when: false
+      failed_when: false
+
+    - name: Download VAST NFS installer
+      ansible.builtin.get_url:
+        url: "{{ nfs_installer_url }}"
+        dest: "{{ nfs_installer_dest }}"
+        mode: "0755"
+      when: vastnfs_status.rc != 0
+
+    - name: Install VAST NFS driver
+      ansible.builtin.command:
+        cmd: >-
+          python3 {{ nfs_installer_dest }}
+          --apply-network-optimizations
+          --apply-read-ahead-cache
+          -y
+      environment:
+        DEBIAN_FRONTEND: noninteractive
+      when: vastnfs_status.rc != 0
+
+    - name: Create mount directories
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: directory
+        mode: "0755"
+      loop: "{{ nfs_mounts }}"
+
+    - name: Check current mount source for each path
+      ansible.builtin.shell:
+        cmd: "findmnt -n -o SOURCE {{ item.path }} 2>/dev/null || echo ''"
+      register: current_sources
+      changed_when: false
+      failed_when: false
+      loop: "{{ nfs_mounts }}"
+
+    - name: Unmount if mounted with wrong source
+      ansible.posix.mount:
+        path: "{{ item.item.path }}"
+        state: absent
+      loop: "{{ current_sources.results }}"
+      when:
+        - item.stdout | trim != ''
+        - item.stdout | trim != item.item.src
+
+    - name: Mount NFS volumes
+      ansible.posix.mount:
+        src: "{{ item.src }}"
+        path: "{{ item.path }}"
+        fstype: nfs
+        opts: "{{ nfs_opts }}"
+        state: mounted
+      loop: "{{ nfs_mounts }}"

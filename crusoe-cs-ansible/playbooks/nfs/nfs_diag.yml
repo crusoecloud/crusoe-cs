@@ -1,0 +1,105 @@
+---
+# Usage: ansible-playbook playbooks/nfs/nfs_diag.yml -e target_hosts=<group>
+- name: Deploy and run NFS CSI mount diagnostic script
+  hosts: "{{ target_hosts | mandatory('Required: -e target_hosts=<group_or_host>') }}"
+  become: true
+
+  vars:
+    diag_script_dest: /usr/local/bin/nfs_csi_mount_diag.sh
+    local_log_dir: "{{ playbook_dir }}/../../logs"
+
+  tasks:
+    - name: Copy NFS CSI diagnostic script
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../../roles/nfs/files/nfs_csi_mount_diag.sh"
+        dest: "{{ diag_script_dest }}"
+        mode: "0755"
+        owner: root
+        group: root
+
+    - name: Install bpftrace
+      ansible.builtin.apt:
+        name: bpftrace
+        state: present
+        update_cache: false
+      when: ansible_os_family == "Debian"
+
+    - name: Run diagnostic script in background
+      ansible.builtin.shell:
+        cmd: "{{ diag_script_dest }}"
+      async: 720
+      poll: 0
+      register: diag_job
+
+    - name: Resolve full Kubernetes node name
+      kubernetes.core.k8s_info:
+        kind: Node
+      register: k8s_nodes
+      delegate_to: localhost
+      become: false
+
+    - name: Find nfs-test pod on target node
+      kubernetes.core.k8s_info:
+        kind: Pod
+        label_selectors:
+          - app=nfs-test
+        field_selectors:
+          - "spec.nodeName={{ (k8s_nodes.resources | selectattr('metadata.name', 'search', inventory_hostname) | first).metadata.name }}"
+      register: nfs_test_pods
+      delegate_to: localhost
+      become: false
+
+    - name: Fail if no nfs-test pod found on target node
+      ansible.builtin.fail:
+        msg: "No nfs-test pod found on {{ inventory_hostname }} — cannot trigger repro"
+      when: nfs_test_pods.resources | length == 0
+
+    - name: Delete nfs-test pod to trigger CSI remount
+      kubernetes.core.k8s:
+        state: absent
+        kind: Pod
+        namespace: "{{ nfs_test_pods.resources[0].metadata.namespace }}"
+        name: "{{ nfs_test_pods.resources[0].metadata.name }}"
+      delegate_to: localhost
+      become: false
+
+    - name: Wait for diagnostic script to complete and fetch evidence
+      block:
+        - name: Wait for diagnostic script to complete
+          ansible.builtin.async_status:
+            jid: "{{ diag_job.ansible_job_id }}"
+          register: job_result
+          until: job_result.finished
+          retries: 22
+          delay: 30
+
+      rescue:
+        - name: Stop async job on timeout
+          ansible.builtin.async_status:
+            jid: "{{ diag_job.ansible_job_id }}"
+            mode: cleanup
+          ignore_errors: true
+
+        - name: Warn that script did not finish cleanly
+          ansible.builtin.debug:
+            msg: "Diagnostic script did not finish within the timeout — collecting whatever evidence exists"
+
+      always:
+        - name: Find evidence bundle on remote node
+          ansible.builtin.find:
+            paths: /tmp
+            patterns: "csi-nfs-trace-*.tar.gz"
+            age: "-2h"
+          register: bundles
+
+        - name: Fetch evidence bundle to local logs directory
+          ansible.builtin.fetch:
+            src: "{{ (bundles.files | sort(attribute='mtime') | last).path }}"
+            dest: "{{ local_log_dir }}/{{ inventory_hostname }}/"
+            flat: true
+          when: bundles.matched > 0
+
+        - name: Warn if no evidence bundle found
+          ansible.builtin.debug:
+            msg: "No evidence bundle found on {{ inventory_hostname }} — script may have been killed before bundling"
+          when: bundles.matched == 0
