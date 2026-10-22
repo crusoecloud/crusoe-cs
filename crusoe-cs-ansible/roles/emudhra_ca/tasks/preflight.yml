@@ -1,0 +1,32 @@
+---
+# Pre-flight: verify the target can run Ansible modules at all.
+# Runs via import_role tasks_from a gather_facts: false play — facts
+# gathering itself needs a working Python, so this must run BEFORE facts.
+# raw needs NO Python on the target; the command is a single POSIX line
+# (dash-safe, no bashisms).
+- name: Pre-flight — verify the target has a Python >= 3.7 interpreter
+  ansible.builtin.raw: >-
+    for py in {{ (['/usr/bin/python3', '/usr/bin/python3.13', '/usr/bin/python3.12',
+                   '/usr/bin/python3.11', '/usr/bin/python3.10', '/usr/bin/python3.9',
+                   '/usr/libexec/platform-python']
+                  + ([ansible_python_interpreter] if ansible_python_interpreter is defined else []))
+                 | unique | join(' ') }}; do
+    command -v "$py" >/dev/null 2>&1 || continue;
+    "$py" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 7) else 1)' && exit 0;
+    done; exit 1
+  register: emudhra_ca_python_check
+  changed_when: false
+  # Never fail here: a non-zero rc must reach the next task, which turns it
+  # into the actionable "install a newer Python" message. Failing on the raw
+  # task aborts the play first and that message is never printed.
+  failed_when: false
+
+- name: Report the interpreter requirement clearly on failure
+  ansible.builtin.fail:
+    msg: >-
+      emudhra_ca: no Python >= 3.7 interpreter found on {{ inventory_hostname }}.
+      Ansible modules require Python >= 3.7 on the target (ansible-core 2.20+).
+      Install a newer Python on the host (e.g. EL8: dnf install python39) and set
+      ansible_python_interpreter to it, or run this playbook with an older
+      ansible-core. This is a hard precondition — the playbook cannot proceed.
+  when: emudhra_ca_python_check.rc != 0

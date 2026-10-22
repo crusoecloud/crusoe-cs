@@ -1,0 +1,23 @@
+---
+# Probe playbook for the vars scenario: include the role and dump the
+# family-resolved variables so the harness can assert per-family dispatch.
+- name: Probe emudhra_ca family vars
+  hosts: all
+  become: true
+  tasks:
+    - name: Include the emudhra_ca role
+      ansible.builtin.include_role:
+        name: emudhra_ca
+        public: true
+
+    - name: Show resolved bundle paths
+      ansible.builtin.debug:
+        var: emudhra_ca_bundle_paths
+
+    - name: Show resolved refresh command
+      ansible.builtin.debug:
+        var: emudhra_ca_refresh_cmd
+
+    - name: Show detection state
+      ansible.builtin.debug:
+        msg: "affected={{ emudhra_ca_affected }} matched={{ emudhra_ca_matched | join(',') }}"

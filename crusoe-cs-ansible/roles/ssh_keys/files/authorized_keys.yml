@@ -1,4 +1,4 @@
 ---
 ssh_authorized_keys:
-  - username: athulasi
+  - username: your-user
     pub_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI...your-public-key-here"

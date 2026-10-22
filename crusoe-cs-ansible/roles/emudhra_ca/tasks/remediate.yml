@@ -1,0 +1,185 @@
+---
+# Remediation — runs ONLY when detection found distrusted roots.
+# Order: (1) apt cache refresh on Debian, (2) upgrade ca-certificates
+# (no version pins), (3) remove manual copies by fingerprint (name-independent),
+# (4) refresh the trust store if anything changed.
+
+- name: Refresh apt cache (Debian)
+  ansible.builtin.apt:
+    update_cache: true
+    cache_valid_time: 3600
+  when: ansible_facts['os_family'] == 'Debian'
+
+- name: Upgrade ca-certificates to latest # noqa: package-latest — deliberate: no per-release pins (spec anti-goal); the verify pass handles lagging distros.
+  ansible.builtin.package:
+    name: ca-certificates
+    state: latest
+  register: emudhra_ca_pkg_upgrade
+
+- name: Find manual CA copies matching distrusted fingerprints
+  ansible.builtin.shell: |
+    set -euo pipefail
+    bad_fps="{{ emudhra_ca_bad_roots | map(attribute='sha256') | join(' ') }}"
+    d="{{ emudhra_ca_manual_ca_dir }}"
+    [ -d "$d" ] || exit 0
+    for cert in "$d"/*.crt "$d"/*.pem; do
+      [ -f "$cert" ] || continue
+      fp="$(openssl x509 -in "$cert" -noout -fingerprint -sha256 2>/dev/null | tr -d ':' | awk -F= '{print toupper($2)}')"
+      case " $bad_fps " in
+        *" $fp "*) echo "$cert" ;;
+      esac
+    done
+  args:
+    executable: /bin/bash
+  changed_when: false
+  register: emudhra_ca_manual_matches
+
+- name: Remove matching manual CA copies
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: "{{ emudhra_ca_manual_matches.stdout_lines }}"
+  register: emudhra_ca_manual_removed
+
+- name: Refresh trust store
+  ansible.builtin.command: "{{ emudhra_ca_refresh_cmd }}"
+  changed_when: true
+  when: >-
+    emudhra_ca_pkg_upgrade is changed
+    or emudhra_ca_manual_removed is changed
+
+- name: Record remediation state
+  ansible.builtin.set_fact:
+    emudhra_ca_remediation_changed: >-
+      {{ emudhra_ca_pkg_upgrade is changed
+         or emudhra_ca_manual_removed is changed }}
+
+- name: Remediation summary
+  ansible.builtin.debug:
+    msg: "emudhra_ca: remediated {{ emudhra_ca_matched | length }} root(s)"
+
+# --- Extended stores: certifi (Python) and Java cacerts ---------------------
+# Remediate ONLY what already exists on the node — never install
+# python3-certifi or Java when absent (user ruling 2026-10-21).
+# package_facts populates ansible_facts.packages natively; the upgrade
+# tasks gate on membership, so an absent package can never be installed.
+# On minimal hosts without python3-apt the gather cannot run — it is
+# non-fatal and the membership gates skip, leaving the in-place excise
+# (below) as the remediation path, which needs no package manager.
+- name: Gather installed packages
+  ansible.builtin.package_facts:
+    manager: auto
+  failed_when: false
+  when: emudhra_ca_extended_stores | bool
+
+# Upgrade-only by construction: the when-gate requires the package to
+# already be installed; never installs. (noqa on the name line below.)
+- name: Upgrade distro certifi package ONLY if already installed (Debian) # noqa: package-latest
+  ansible.builtin.apt:
+    name: python3-certifi
+    state: latest
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - emudhra_ca_extended_stores | bool
+    - ansible_facts.packages is defined
+    - "'python3-certifi' in ansible_facts.packages"
+
+# Upgrade-only by construction: the when-gate requires the package to
+# already be installed; never installs. (noqa on the name line below.)
+- name: Upgrade distro certifi package ONLY if already installed (RedHat) # noqa: package-latest
+  ansible.builtin.dnf:
+    name: python3-certifi
+    state: latest
+  when:
+    - ansible_facts['os_family'] == 'RedHat'
+    - emudhra_ca_extended_stores | bool
+    - ansible_facts.packages is defined
+    - "'python3-certifi' in ansible_facts.packages"
+
+- name: Report absent certifi (skipped — never install)
+  ansible.builtin.debug:
+    msg: >-
+      emudhra_ca: python3-certifi not installed on this node —
+      skipping package upgrade (never install); pip-installed bundles,
+      if any, are handled by the in-place excise below.
+  when:
+    - emudhra_ca_extended_stores | bool
+    - ansible_facts.packages is defined
+    - "'python3-certifi' not in ansible_facts.packages"
+
+- name: Excise distrusted PEM blocks from certifi bundles in place
+  # Fallback for pip-installed certifi (no package manager owns it) and
+  # distro packages whose fixed version is not yet in released repos.
+  # Rewrites cacert.pem WITHOUT the matching blocks — idempotent (a re-run
+  # finds nothing to remove). Only touches files that already exist.
+  ansible.builtin.shell: |
+    set -uo pipefail
+    bad_fps="{{ emudhra_ca_bad_roots | map(attribute='sha256') | join(' ') }}"
+    changed=0
+    for pem in {{ emudhra_ca_certifi_files | default([]) | join(' ') }}; do
+      [ -f "$pem" ] || continue
+      d="$(mktemp -d)"; i=0; f=''
+      changed_this=0
+      awk -v d="$d" '/BEGIN CERTIFICATE/{f=sprintf("%s/c.%d.pem",d,++i)} f{print > f} /END CERTIFICATE/{close(f); f=""}' "$pem"
+      keep="$(mktemp)"; : > "$keep"
+      for c in "$d"/*.pem; do
+        fp="$(openssl x509 -in "$c" -noout -fingerprint -sha256 2>/dev/null | tr -d ':' | awk -F= '{print toupper($2)}')"
+        case " $bad_fps " in
+          *" $fp "*) changed_this=1 ;;   # drop the block
+          *) cat "$c" >> "$keep" ;;
+        esac
+      done
+      # Only rewrite bundles that actually lost a block — a clean bundle
+      # stays byte-identical (the reassembly would strip its comments).
+      if [ "$changed_this" -eq 1 ]; then
+        cp "$keep" "$pem" && echo "excised: $pem"
+        changed=1
+      fi
+      rm -rf "$d" "$keep"
+    done
+    exit 0
+  args:
+    executable: /bin/bash
+  when: emudhra_ca_extended_stores | bool
+  register: emudhra_ca_certifi_excised
+  changed_when: emudhra_ca_certifi_excised.stdout_lines | length > 0
+
+- name: Delete affected aliases from existing Java keystores
+  # keytool -delete on each affected alias in each existing keystore.
+  # Idempotent: a deleted alias is absent on re-run. Never installs Java.
+  # Affected aliases are derived from ONE keytool -list -rfc dump per
+  # keystore (see detect.yml) — the only per-alias JVM spawns left are the
+  # deletes themselves, which are rare (only affected aliases).
+  ansible.builtin.shell: |
+    set -uo pipefail
+    bad_fps="{{ emudhra_ca_bad_roots | map(attribute='sha256') | join(' ') }}"
+    for ks in {{ emudhra_ca_java_keystores | default([]) | join(' ') }}; do
+      [ -f "$ks" ] || continue
+      command -v keytool >/dev/null 2>&1 || continue
+      d="$(mktemp -d)"
+      keytool -list -rfc -keystore "$ks" -storepass changeit 2>/dev/null \
+        | awk -v d="$d" '
+          # Capture the WHOLE alias: keystore aliases may contain spaces,
+          # and a truncated alias would make keytool -delete miss (or, worse,
+          # delete the wrong entry).
+          /^Alias name:/ { alias=$0; sub(/^Alias name:[ \t]*/, "", alias); n++ }
+          /BEGIN CERTIFICATE/ { f=sprintf("%s/a.%d.pem", d, n); print "#" alias > f }
+          f { print > f }
+          /END CERTIFICATE/ { close(f); f="" }'
+      for c in "$d"/*.pem; do
+        [ -f "$c" ] || continue
+        alias="$(head -1 "$c" | sed 's/^#//')"
+        fp="$(openssl x509 -in "$c" -noout -fingerprint -sha256 2>/dev/null | tr -d ':' | awk -F= '{print toupper($2)}')"
+        case " $bad_fps " in
+          *" $fp "*) keytool -delete -alias "$alias" -keystore "$ks" -storepass changeit >/dev/null 2>&1 \
+                     && echo "deleted: ${ks}:${alias}" ;;
+        esac
+      done
+      rm -rf "$d"
+    done
+    exit 0
+  args:
+    executable: /bin/bash
+  when: emudhra_ca_extended_stores | bool
+  register: emudhra_ca_java_deleted
+  changed_when: emudhra_ca_java_deleted.stdout_lines | length > 0

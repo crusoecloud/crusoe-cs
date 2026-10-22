@@ -1,0 +1,42 @@
+---
+# Usage: ansible-playbook playbooks/emudhra-ca/distrust-emudhra-roots.yml -e target_hosts=<group>
+#
+# Variables:
+#   target_hosts                        (required) — inventory host or group
+#   emudhra_ca_run_connectivity_check (optional, default: true) — live s_client
+#     canary check on remediated hosts; set false on hosts without egress to
+#     the advisory test sites
+#   emudhra_ca_fail_on_unsupported_family (optional, default: false) — fail
+#     instead of skip on non-Debian/RedHat families
+#
+# Examples:
+#   Remediate the fleet:
+#     ansible-playbook playbooks/emudhra-ca/distrust-emudhra-roots.yml -e target_hosts=gpu-nodes
+#
+#   Skip the live connectivity check:
+#     ansible-playbook playbooks/emudhra-ca/distrust-emudhra-roots.yml \
+#       -e target_hosts=gpu-nodes -e emudhra_ca_run_connectivity_check=false
+#
+# The role detects affected hosts by exact SHA-256 fingerprint (from the
+# advisory's roots.json — see roles/emudhra_ca/vars/main.yml) and only
+# remediates those; clean hosts report zero changes.
+#
+# Play 1 runs the interpreter pre-flight with gather_facts: false — facts
+# gathering itself needs a working Python on the target, so the pre-flight
+# must run BEFORE facts to catch broken hosts with a clear message instead
+# of a cryptic module error.
+- name: Pre-flight — verify targets can run Ansible modules
+  hosts: "{{ target_hosts | mandatory('Required: -e target_hosts=<group_or_host>') }}"
+  gather_facts: false
+  tasks:
+    - name: Run the interpreter pre-flight
+      ansible.builtin.import_role:
+        name: emudhra_ca
+        tasks_from: preflight.yml
+
+- name: Distrust compromised eMudhra root CAs
+  hosts: "{{ target_hosts | mandatory('Required: -e target_hosts=<group_or_host>') }}"
+  become: true
+
+  roles:
+    - emudhra_ca

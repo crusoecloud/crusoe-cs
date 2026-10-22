@@ -1,0 +1,85 @@
+---
+# Detection: is any distrusted root (by exact SHA-256 fingerprint) present in
+# the active trust bundle — and, when enabled, in the extended stores
+# (certifi bundles, Java cacerts)? Sets emudhra_ca_affected /
+# emudhra_ca_matched. A missing bundle file means nothing is trusted from
+# it -> not affected. Extended stores are scanned ONLY where they already
+# exist on the node (never install, user ruling 2026-10-21).
+- name: Scan active trust bundles for distrusted roots
+  ansible.builtin.include_tasks: scan-bundle.yml
+  vars:
+    scan_bundles: "{{ emudhra_ca_bundle_paths }}"
+    scan_register: emudhra_ca_detect_scan
+
+# --- Extended stores: certifi (Python) and Java cacerts ---------------------
+# Find existing bundles/keystores only — absent stores are skipped, never
+# created. Opt-out via emudhra_ca_extended_stores: false.
+- name: Find existing certifi bundles (never install)
+  ansible.builtin.shell: |
+    set -uo pipefail
+    shopt -s nullglob
+    # Distro certifi and any pip-installed copies. Absent = nothing printed
+    # = skipped downstream. NO installation.
+    for d in \
+      /usr/lib/python3/dist-packages/certifi \
+      /usr/lib/python3.*/site-packages/certifi \
+      /usr/lib64/python3.*/site-packages/certifi \
+      /usr/local/lib/python3.*/dist-packages/certifi \
+      /usr/local/lib/python3.*/site-packages/certifi; do
+      [ -f "$d/cacert.pem" ] && echo "$d/cacert.pem"
+    done
+    # venvs and user installs (best-effort, bounded)
+    find /root /home -maxdepth 6 -path "*/certifi/cacert.pem" -type f 2>/dev/null | head -20
+    exit 0
+  args:
+    executable: /bin/bash
+  changed_when: false
+  register: emudhra_ca_certifi_find
+  when: emudhra_ca_extended_stores | bool
+
+- name: Find existing Java keystores (never install)
+  ansible.builtin.shell: |
+    set -uo pipefail
+    # Standard JVM locations only; absent = nothing printed = skipped.
+    for j in /usr/lib/jvm/*/lib/security/cacerts; do
+      [ -f "$j" ] && echo "$j"
+    done
+    exit 0
+  args:
+    executable: /bin/bash
+  changed_when: false
+  register: emudhra_ca_java_find
+  when: emudhra_ca_extended_stores | bool
+
+- name: Record extended store paths
+  ansible.builtin.set_fact:
+    emudhra_ca_certifi_files: "{{ emudhra_ca_certifi_find.stdout_lines | default([]) }}"
+    emudhra_ca_java_keystores: "{{ emudhra_ca_java_find.stdout_lines | default([]) }}"
+  when: emudhra_ca_extended_stores | bool
+
+- name: Scan extended stores for distrusted roots
+  ansible.builtin.include_tasks: scan-extended.yml
+  vars:
+    scan_certifi_files: "{{ emudhra_ca_certifi_files }}"
+    scan_java_keystores: "{{ emudhra_ca_java_keystores }}"
+    scan_register: emudhra_ca_extended_scan
+  when: emudhra_ca_extended_stores | bool
+
+# emudhra_ca_extended_scan is set by the include above, which is skipped
+# when extended stores are disabled — guard the whole variable, not just
+# the attribute, so the expression is explicit about the skipped case.
+- name: Record detection result
+  ansible.builtin.set_fact:
+    emudhra_ca_matched: "{{ emudhra_ca_detect_scan.stdout_lines }}"
+    emudhra_ca_extended_matched: >-
+      {{ (emudhra_ca_extended_scan | default({})).stdout_lines | default([]) | unique }}
+    emudhra_ca_affected: >-
+      {{ (emudhra_ca_detect_scan.stdout_lines | length > 0)
+         or ((emudhra_ca_extended_scan | default({})).stdout_lines | default([]) | length > 0) }}
+
+- name: Detection summary
+  ansible.builtin.debug:
+    msg: >-
+      emudhra_ca: affected={{ emudhra_ca_affected }}
+      matched={{ emudhra_ca_matched | join(',') }}
+      extended_matched={{ emudhra_ca_extended_matched | default([]) | join(',') }}

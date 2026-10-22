@@ -1,0 +1,11 @@
+# E2E target image: stock Ubuntu/Debian + python3 (Ansible modules need a
+# Python interpreter on the target) + trust-store tooling (every scenario
+# the CA bundle). certifi + python3-apt are baked in as FIXTURES for the
+# extended-stores scenario (the role itself never installs them);
+# python3-apt mirrors real Ubuntu VMs so package_facts works.
+ARG BASE=ubuntu:24.04
+FROM ${BASE}
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends python3 ca-certificates openssl \
+      python3-certifi python3-apt && \
+    rm -rf /var/lib/apt/lists/*

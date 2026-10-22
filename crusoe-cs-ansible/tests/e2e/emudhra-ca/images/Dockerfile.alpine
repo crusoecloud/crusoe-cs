@@ -1,0 +1,5 @@
+# E2E target image: stock Alpine + python3 (for the unsupported-family
+# scenario — the role must still execute its skip logic there).
+ARG BASE=alpine:3.20
+FROM ${BASE}
+RUN apk add --no-cache python3

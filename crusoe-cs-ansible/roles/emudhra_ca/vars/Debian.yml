@@ -1,0 +1,8 @@
+---
+# Debian-family paths and commands for emudhra_ca.
+emudhra_ca_bundle_paths:
+  - /etc/ssl/certs/ca-certificates.crt
+emudhra_ca_manual_ca_dir: /usr/local/share/ca-certificates
+emudhra_ca_refresh_cmd: update-ca-certificates --fresh
+emudhra_ca_conf_file: /etc/ca-certificates.conf
+emudhra_ca_package_ca_dir: /usr/share/ca-certificates

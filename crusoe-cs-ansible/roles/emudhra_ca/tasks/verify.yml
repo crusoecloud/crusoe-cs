@@ -1,0 +1,156 @@
+---
+# Verify + fallback: re-run detection after remediation. If distrusted roots
+# survive (fixed package not yet in the host's repos — expected on Rocky at
+# first), apply the advisory's official distrust method:
+#   Debian:  '!'-prefix the matching entries in /etc/ca-certificates.conf
+#   RedHat:  copy the matching root PEMs into the blocklist dir
+# Then refresh and re-verify. Still affected after the fallback -> fail loud.
+
+- name: Re-scan active trust bundles after remediation
+  ansible.builtin.include_tasks: scan-bundle.yml
+  vars:
+    scan_bundles: "{{ emudhra_ca_bundle_paths }}"
+    scan_register: emudhra_ca_verify_scan
+
+- name: Record surviving roots
+  ansible.builtin.set_fact:
+    emudhra_ca_surviving: "{{ emudhra_ca_verify_scan.stdout_lines }}"
+
+- name: Blocklist surviving roots (Debian)
+  when: >-
+    ansible_facts['os_family'] == 'Debian'
+    and emudhra_ca_surviving | length > 0
+  block:
+    - name: Find ca-certificates.conf entries matching surviving roots
+      ansible.builtin.shell: |
+        set -euo pipefail
+        bad_fps="{{ emudhra_ca_surviving | join(' ') }}"
+        while IFS= read -r entry; do
+          # Normalize: strip ALL leading '!' so an already-prefixed (or
+          # double-prefixed) entry converges to its bare form. The replace
+          # task then re-prefixes exactly one '!' — idempotent across re-runs
+          # (a bare '!!entry' line would re-enable the cert in update-ca-certificates).
+          entry="${entry##*!}"
+          # conf entries already carry the .crt extension (e.g.
+          # mozilla/emSign_ECC_Root_CA_-_G3.crt) — do not append another.
+          cert_file="{{ emudhra_ca_package_ca_dir }}/${entry}"
+          [ -f "$cert_file" ] || continue
+          fp="$(openssl x509 -in "$cert_file" -noout -fingerprint -sha256 2>/dev/null | tr -d ':' | awk -F= '{print toupper($2)}')"
+          case " $bad_fps " in
+            *" $fp "*) echo "$entry" ;;
+          esac
+        done < "{{ emudhra_ca_conf_file }}"
+      args:
+        executable: /bin/bash
+      changed_when: false
+      register: emudhra_ca_conf_matches
+
+    - name: Prefix matching entries with '!' in ca-certificates.conf
+      # The scan emits the BARE entry (all leading '!' stripped), so this
+      # converges to exactly one '!' even on already-prefixed lines — but
+      # only if the bare form is what's on disk. A line already '!entry'
+      # does not match '^entry$', so it is left alone (already disabled);
+      # a hypothetical '!!entry' line also does not match and stays broken
+      # until the package rewrites the conf. Acceptable: '!!' is only
+      # reachable via a package downgrade between fallback runs.
+      ansible.builtin.replace:
+        path: "{{ emudhra_ca_conf_file }}"
+        regexp: '^({{ item | regex_escape }})$'
+        replace: '!\1'
+      loop: "{{ emudhra_ca_conf_matches.stdout_lines }}"
+      register: emudhra_ca_conf_prefixed
+
+- name: Blocklist surviving roots (RedHat)
+  when: >-
+    ansible_facts['os_family'] == 'RedHat'
+    and emudhra_ca_surviving | length > 0
+  block:
+    - name: Resolve the blocklist directory (blocklist/ on newer p11-kit, blacklist/ on older)
+      ansible.builtin.shell: |
+        for d in {{ emudhra_ca_blocklist_dirs | join(' ') }}; do
+          [ -d "$d" ] && { echo "$d"; exit 0; }
+        done
+        mkdir -p {{ emudhra_ca_blocklist_dirs[0] }}
+        echo {{ emudhra_ca_blocklist_dirs[0] }}
+      args:
+        executable: /bin/bash
+      changed_when: false
+      register: emudhra_ca_blocklist_dir_scan
+
+    - name: Record the resolved blocklist directory
+      ansible.builtin.set_fact:
+        emudhra_ca_blocklist_dir: "{{ emudhra_ca_blocklist_dir_scan.stdout | trim }}"
+
+    - name: Ensure blocklist directory exists
+      ansible.builtin.file:
+        path: "{{ emudhra_ca_blocklist_dir }}"
+        state: directory
+        mode: "0755"
+
+    - name: Copy surviving root PEMs into the blocklist
+      ansible.builtin.copy:
+        src: "certs/{{ item.cert }}"
+        dest: "{{ emudhra_ca_blocklist_dir }}/{{ item.cert }}"
+        mode: "0644"
+      loop: >-
+        {{ emudhra_ca_bad_roots
+           | selectattr('sha256', 'in', emudhra_ca_surviving)
+           | list }}
+      register: emudhra_ca_blocklist_copied
+
+- name: Refresh trust store after fallback
+  ansible.builtin.command: "{{ emudhra_ca_refresh_cmd }}"
+  changed_when: true
+  when: >-
+    emudhra_ca_surviving | length > 0
+    and ((emudhra_ca_conf_prefixed is defined
+          and emudhra_ca_conf_prefixed is changed)
+         or (emudhra_ca_blocklist_copied is defined
+             and emudhra_ca_blocklist_copied is changed))
+
+- name: Report fallback loudly
+  ansible.builtin.debug:
+    msg: >-
+      EMUDHRA_SCA_FALLBACK: package upgrade did not clear
+      {{ emudhra_ca_surviving | join(', ') }};
+      blocklist fallback applied
+  when: emudhra_ca_surviving | length > 0
+
+- name: Final verification scan
+  ansible.builtin.include_tasks: scan-bundle.yml
+  vars:
+    scan_bundles: "{{ emudhra_ca_bundle_paths }}"
+    scan_register: emudhra_ca_final_scan
+
+- name: Fail if distrusted roots survive the fallback
+  ansible.builtin.fail:
+    msg: "emudhra_ca: still affected after fallback: {{ emudhra_ca_final_scan.stdout_lines | join(', ') }}"
+  when: emudhra_ca_final_scan.stdout_lines | length > 0
+
+# --- Extended stores: re-scan certifi bundles and Java keystores ------------
+- name: Re-scan extended stores after remediation
+  ansible.builtin.include_tasks: scan-extended.yml
+  vars:
+    scan_certifi_files: "{{ emudhra_ca_certifi_files | default([]) }}"
+    scan_java_keystores: "{{ emudhra_ca_java_keystores | default([]) }}"
+    scan_register: emudhra_ca_extended_verify_scan
+  when: emudhra_ca_extended_stores | bool
+
+- name: Fail if distrusted roots survive in extended stores
+  ansible.builtin.fail:
+    msg: >-
+      emudhra_ca: distrusted roots survive in extended stores after
+      remediation: {{ emudhra_ca_extended_verify_scan.stdout_lines | join(', ') }}
+  when:
+    - emudhra_ca_extended_stores | bool
+    - (emudhra_ca_extended_verify_scan | default({})).stdout_lines | default([]) | length > 0
+
+- name: Extended stores remediation summary
+  ansible.builtin.debug:
+    msg: >-
+      emudhra_ca: extended stores clean
+      (certifi bundles: {{ emudhra_ca_certifi_files | default([]) | length }},
+      java keystores: {{ emudhra_ca_java_keystores | default([]) | length }})
+  when:
+    - emudhra_ca_extended_stores | bool
+    - (emudhra_ca_extended_verify_scan | default({})).stdout_lines | default([]) | length == 0

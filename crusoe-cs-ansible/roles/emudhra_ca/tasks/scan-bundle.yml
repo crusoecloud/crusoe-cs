@@ -1,0 +1,47 @@
+---
+# Shared bundle scanner — the ONE implementation of the fingerprint scan.
+#
+# Splits each PEM bundle into individual certificates, fingerprints each
+# with openssl (SHA-256, uppercase, colon-stripped), and emits the sorted
+# unique fingerprints that match the distrusted-roots list.
+#
+# Parameters (pass via include_tasks vars):
+#   scan_bundles   list of PEM bundle paths to scan (missing files skipped)
+#   scan_register  name of the register to store the result in
+#
+# The registered variable's stdout_lines is the sorted unique list of
+# matched fingerprints (empty = clean). Callers assert on that.
+#
+# Used by: detect.yml (initial scan), verify.yml (re-scan after
+# remediation, final verification after fallback) — the three sites that
+# previously carried byte-identical copies of this block.
+
+- name: "Scan bundles for distrusted roots"
+  ansible.builtin.shell: |
+    set -uo pipefail
+    shopt -s nullglob
+    bad_fps="{{ emudhra_ca_bad_roots | map(attribute='sha256') | join(' ') }}"
+    found=""
+    for bundle in {{ scan_bundles | join(' ') }}; do
+      [ -f "$bundle" ] || continue
+      d="$(mktemp -d)"
+      i=0; f=''
+      awk -v d="$d" '/BEGIN CERTIFICATE/{f=sprintf("%s/c.%d.pem",d,++i)} f{print > f} /END CERTIFICATE/{close(f); f=""}' "$bundle"
+      for pem in "$d"/*.pem; do
+        fp="$(openssl x509 -in "$pem" -noout -fingerprint -sha256 2>/dev/null | tr -d ':' | awk -F= '{print toupper($2)}')"
+        case " $bad_fps " in
+          *" $fp "*) found="$found $fp" ;;
+        esac
+      done
+      rm -rf "$d"
+    done
+    for fp in $found; do echo "$fp"; done | sort -u
+    exit 0
+  args:
+    executable: /bin/bash
+  changed_when: false
+  register: emudhra_ca_scan_bundle_result
+
+- name: "Record scan result → {{ scan_register }}"
+  ansible.builtin.set_fact:
+    "{{ scan_register }}": "{{ emudhra_ca_scan_bundle_result }}"

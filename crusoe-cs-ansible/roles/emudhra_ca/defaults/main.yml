@@ -1,0 +1,8 @@
+---
+# Defaults are overridable by the caller; vars/main.yml is not.
+emudhra_ca_run_connectivity_check: true
+emudhra_ca_fail_on_unsupported_family: false
+# Extended trust stores (certifi, Java cacerts): detect/remediate/verify
+# ONLY stores already present on the node — never install python3-certifi
+# or Java when absent (user ruling 2026-10-21).
+emudhra_ca_extended_stores: true

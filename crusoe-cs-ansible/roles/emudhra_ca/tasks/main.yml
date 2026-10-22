@@ -1,0 +1,67 @@
+---
+# Role entrypoint. The interpreter pre-flight lives in tasks/preflight.yml,
+# invoked by the wrapper playbook's gather_facts: false first play — it must
+# run BEFORE facts gathering (which itself needs a working Python).
+
+# Unsupported families skip with a warning (or fail, per the default).
+- name: Refuse to run on unsupported OS families
+  when: ansible_facts['os_family'] not in ['Debian', 'RedHat']
+  block:
+    - name: Report unsupported OS family
+      ansible.builtin.debug:
+        msg: "emudhra_ca: unsupported OS family {{ ansible_facts['os_family'] }}, skipping"
+
+    - name: Fail on unsupported family when configured
+      ansible.builtin.fail:
+        msg: "emudhra_ca: unsupported OS family {{ ansible_facts['os_family'] }}"
+      when: emudhra_ca_fail_on_unsupported_family | bool
+
+    - name: Skip the rest of the role on this host
+      ansible.builtin.meta: end_host
+
+# Platform-specific vars (vars/Debian.yml, vars/RedHat.yml) are NOT auto-loaded
+# by Ansible — only vars/main.yml and defaults/main.yml are. Load explicitly.
+- name: Load family-specific variables
+  ansible.builtin.include_vars:
+    file: "{{ role_path }}/vars/{{ ansible_facts['os_family'] }}.yml"
+  when: ansible_facts['os_family'] in ['Debian', 'RedHat']
+
+- name: Detect distrusted roots in the trust bundle
+  ansible.builtin.import_tasks: detect.yml
+  when: ansible_facts['os_family'] in ['Debian', 'RedHat']
+
+- name: Remediate affected hosts
+  ansible.builtin.import_tasks: remediate.yml
+  when: >-
+    ansible_facts['os_family'] in ['Debian', 'RedHat']
+    and emudhra_ca_affected | bool
+
+- name: Verify remediation and apply blocklist fallback if needed
+  ansible.builtin.import_tasks: verify.yml
+  when: >-
+    ansible_facts['os_family'] in ['Debian', 'RedHat']
+    and emudhra_ca_affected | bool
+
+# Canary check on remediated hosts only: sites chained to the distrusted
+# roots must now fail verification. s_client exits 0 on a bad chain unless
+# -verify_return_error is set; stdin "Q" stops it waiting for input. Matching
+# the verify error means a DNS/network failure does NOT count as a pass.
+# -servername carries the name WITHOUT the trailing dot: the dot keeps DNS
+# resolution absolute (no search-domain surprises), but many servers reject
+# an SNI value ending in '.', which would surface as an unrelated TLS error
+# and fail the check for the wrong reason.
+- name: Confirm sites chained to distrusted roots fail verification
+  ansible.builtin.command:
+    cmd: >-
+      openssl s_client -connect {{ item }}:443
+      -servername {{ item | regex_replace('\.$', '') }}
+      -verify_return_error
+    stdin: Q
+  loop: "{{ emudhra_ca_test_sites }}"
+  register: emudhra_ca_connectivity_check
+  changed_when: false
+  failed_when: "'certificate verify failed' not in emudhra_ca_connectivity_check.stderr"
+  when: >-
+    ansible_facts['os_family'] in ['Debian', 'RedHat']
+    and emudhra_ca_affected | bool
+    and emudhra_ca_run_connectivity_check | bool

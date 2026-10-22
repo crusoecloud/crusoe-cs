@@ -1,0 +1,77 @@
+---
+# Shared extended-stores scanner — the ONE implementation of the
+# certifi-bundle and Java-keystore fingerprint scan.
+#
+# Scans existing certifi cacert.pem bundles and Java cacerts keystores
+# (paths passed in; absent stores are skipped, never created) for the
+# distrusted fingerprints. Emits "store:path:fingerprint" lines for each
+# match (store is "certifi" or "java"), sorted unique.
+#
+# Parameters (pass via include_tasks vars):
+#   scan_certifi_files  list of certifi cacert.pem paths (default [])
+#   scan_java_keystores list of cacerts keystore paths (default [])
+#   scan_register       name of the fact to store the result in
+#
+# The recorded fact's stdout_lines is the sorted unique match list
+# (empty = clean). Callers assert on that.
+#
+# Used by: detect.yml (initial extended scan), verify.yml (re-scan after
+# remediation) — the two sites that previously carried near-identical
+# copies (they differed only in task name, a comment, and default()
+# handling).
+
+- name: "Scan extended stores for distrusted roots"
+  ansible.builtin.shell: |
+    set -uo pipefail
+    bad_fps="{{ emudhra_ca_bad_roots | map(attribute='sha256') | join(' ') }}"
+    scan_pem() {
+      local pem="$1" d i f fp
+      [ -f "$pem" ] || return 0
+      d="$(mktemp -d)"; i=0; f=''
+      awk -v d="$d" '/BEGIN CERTIFICATE/{f=sprintf("%s/c.%d.pem",d,++i)} f{print > f} /END CERTIFICATE/{close(f); f=""}' "$pem"
+      for c in "$d"/*.pem; do
+        fp="$(openssl x509 -in "$c" -noout -fingerprint -sha256 2>/dev/null | tr -d ':' | awk -F= '{print toupper($2)}')"
+        case " $bad_fps " in
+          *" $fp "*) echo "certifi:${pem}:${fp}" ;;
+        esac
+      done
+      rm -rf "$d"
+    }
+    scan_keystore() {
+      local ks="$1" d alias fp
+      command -v keytool >/dev/null 2>&1 || return 0
+      # ONE keytool invocation per keystore: -list -rfc dumps every entry
+      # as PEM. awk splits the dump into alias-tagged files (the alias line
+      # precedes each cert), then openssl fingerprints each — no JVM spawn
+      # per alias (that was ~1-2s x ~100 aliases per keystore).
+      d="$(mktemp -d)"
+      keytool -list -rfc -keystore "$ks" -storepass changeit 2>/dev/null \
+        | awk -v d="$d" '
+          # Capture the WHOLE alias: keystore aliases may contain spaces
+          # (e.g. "Alias name: my root ca"), so $3 would truncate it and
+          # the fingerprint match would report the wrong alias.
+          /^Alias name:/ { alias=$0; sub(/^Alias name:[ \t]*/, "", alias); n++ }
+          /BEGIN CERTIFICATE/ { f=sprintf("%s/a.%d.pem", d, n); print "#" alias > f }
+          f { print > f }
+          /END CERTIFICATE/ { close(f); f="" }'
+      for c in "$d"/*.pem; do
+        [ -f "$c" ] || continue
+        alias="$(head -1 "$c" | sed 's/^#//')"
+        fp="$(openssl x509 -in "$c" -noout -fingerprint -sha256 2>/dev/null | tr -d ':' | awk -F= '{print toupper($2)}')"
+        case " $bad_fps " in
+          *" $fp "*) echo "java:${ks}:${fp}" ;;
+        esac
+      done
+      rm -rf "$d"
+    }
+    for pem in {{ scan_certifi_files | default([]) | join(' ') }}; do scan_pem "$pem"; done
+    for ks in {{ scan_java_keystores | default([]) | join(' ') }}; do scan_keystore "$ks"; done
+    exit 0
+  args:
+    executable: /bin/bash
+  changed_when: false
+  register: emudhra_ca_scan_extended_result
+
+- name: "Record extended scan result → {{ scan_register }}"
+  ansible.builtin.set_fact:
+    "{{ scan_register }}": "{{ emudhra_ca_scan_extended_result }}"

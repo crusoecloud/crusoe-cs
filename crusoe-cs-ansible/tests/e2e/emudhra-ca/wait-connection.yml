@@ -1,0 +1,12 @@
+---
+# Wait for SSH/module-channel readiness on freshly created VMs. Used by the
+# VM e2e harness (tests/e2e/emudhra-ca/vms.py) after `up` — replaces a
+# hand-rolled SSH poll loop with ansible.builtin.wait_for_connection, which
+# blocks until the module channel answers (event-driven, no fixed sleeps).
+- name: Wait for VMs to accept connections
+  hosts: all
+  gather_facts: false
+  tasks:
+    - name: Wait for the Ansible module channel to answer
+      ansible.builtin.wait_for_connection:
+        timeout: "{{ wait_timeout | default(600) }}"

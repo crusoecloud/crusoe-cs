@@ -65,6 +65,32 @@ Bootstrap installs the pinned Python version (3.14), creates the virtualenv, ins
 
 All remote playbooks require `-e target_hosts=<group>`. Omitting it will fail with a clear error.
 
+### eMudhra SCA distrusted roots
+
+Removes the four root CAs chained to the compromised eMudhra intermediates
+(advisory: <https://emudhra.we-have-a-problem.com/>) from Debian- and
+RedHat-family hosts. Detection is by exact SHA-256 fingerprint; only
+affected hosts are remediated — clean hosts report zero changes.
+
+📖 **Customer-facing runbook:
+[`playbooks/emudhra-ca/README.md`](playbooks/emudhra-ca/README.md)** —
+prerequisites, inventory setup, staged rollout, what is and is not in
+scope, and the full variable reference.
+
+```bash
+# Remediate the fleet
+ansible-playbook playbooks/emudhra-ca/distrust-emudhra-roots.yml -e target_hosts=<group>
+
+# Skip the live s_client canary check (hosts without egress)
+ansible-playbook playbooks/emudhra-ca/distrust-emudhra-roots.yml \
+  -e target_hosts=<group> -e emudhra_ca_run_connectivity_check=false
+```
+
+E2E tests (Docker containers, all four roots, five distros):
+`tests/e2e/emudhra-ca/run.sh all` — see `tests/e2e/emudhra-ca/README.md`. The build-time cert
+check (`tests/e2e/emudhra-ca/check-certs.sh`) asserts every shipped root PEM hashes to
+its pinned fingerprint.
+
 ### NFS
 
 ```bash

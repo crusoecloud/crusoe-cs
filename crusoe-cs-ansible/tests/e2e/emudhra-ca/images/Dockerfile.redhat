@@ -1,0 +1,13 @@
+# E2E target image: stock Rocky/AlmaLinux + python3 (Ansible modules need a
+# Python interpreter on the target) + trust-store tooling. Rocky 9/Alma 9 ship
+# a new-enough python3; Rocky 8's default is 3.6 (too old for ansible-core 2.20),
+# so python39 + python39-dnf are installed ALONGSIDE — the system python is NOT
+# modified. The e2e harness detects the right interpreter per container and
+# sets ansible_python_interpreter in the inventory accordingly.
+ARG BASE=rockylinux:9
+FROM ${BASE}
+RUN dnf install -y python3 ca-certificates openssl && \
+    dnf clean all && \
+    if ! python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 7) else 1)'; then \
+      dnf install -y python39 python39-dnf; \
+    fi

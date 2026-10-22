@@ -11,3 +11,9 @@ __pycache__/
 *.retry
 logs/
 .worktrees/
+tests/e2e/emudhra-ca/.inventory.ini
+tests/e2e/emudhra-ca/.inventory-*.ini
+tests/e2e/emudhra-ca/.run-*.log
+
+# agent working scratch (SDD briefs, ledgers)
+.superpowers/

@@ -1,0 +1,12 @@
+---
+# RedHat-family paths and commands for emudhra_ca.
+emudhra_ca_bundle_paths:
+  - /etc/pki/tls/certs/ca-bundle.crt
+  - /etc/pki/tls/certs/ca-bundle.trust.crt
+emudhra_ca_manual_ca_dir: /etc/pki/ca-trust/source/anchors
+emudhra_ca_refresh_cmd: update-ca-trust
+# p11-kit >= 0.25 uses blocklist/; older releases (Rocky 8, EL8) use blacklist/.
+# The role resolves the existing dir at runtime (see verify.yml).
+emudhra_ca_blocklist_dirs:
+  - /etc/pki/ca-trust/source/blocklist
+  - /etc/pki/ca-trust/source/blacklist

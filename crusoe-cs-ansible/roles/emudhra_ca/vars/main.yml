@@ -1,0 +1,55 @@
+---
+# Distrusted roots from the eMudhra intermediate CA compromise advisory:
+# https://emudhra.we-have-a-problem.com/roots.json (fetched 2026-10-21)
+#
+# SHA-256 fingerprints are pinned verbatim from roots.json and are the ONLY
+# identity used for matching — names differ across sources (e.g. the advisory
+# and Ubuntu's blog say "emSign Root TLS CA - G3" while Mozilla certdata and
+# the Rocky c9s patches say "emSign ECC Root CA - G3"; those are two DIFFERENT
+# certificates, both listed below). Never match by name.
+#
+# Corroboration (independent of the advisory):
+#   - AAA Certificate Services SHA-256 matches the Rocky 9 (c9s)
+#     remove-aaa-certificate-services.patch certdata block verbatim.
+#   - emSign ECC Root CA - G3 serial (3CF607A968700EDA8B84) and MD5/SHA1
+#     match the c9s remove-emsign-ecc-root-ca-g3.patch block.
+#   - Ubuntu USN-8944-1 and Debian DSA-6572-1 corroborate the event (names only).
+#
+# emudhra_ca_bad_roots: each entry needs name (display only), sha256 (match
+# key), and the PEM file shipped in files/certs/ (used for e2e injection and
+# the RedHat blocklist fallback). A build-time check asserts each shipped PEM
+# hashes to its pinned sha256.
+emudhra_ca_bad_roots:
+  - name: emSign ECC Root CA - G3
+    sha256: 86A1ECBA089C4A8D3BBE2734C612BA341D813E043CF9E8A862CD5C57A36BBE6B
+    cert: emSign_ECC_Root_CA_-_G3.crt
+    note: >-
+      Cross-signer of the compromised eMudhra intermediates; Mozilla-included,
+      so it ships in distro ca-certificates bundles — the root the distro
+      updates (Ubuntu 20260816*, Debian 20260816+nmu1, c9s patches) blacklist.
+  - name: AAA Certificate Services
+    sha256: D7A7A0FB5D7E2731D771E9484EBCDEF71D5F0C3E0A2948782BC83EE0EA699EF4
+    cert: Comodo_AAA_Services_root.crt
+    note: >-
+      Comodo/Sectigo root, direct issuer of the Sectigo cross-signs; already
+      dropped from Ubuntu >=22.04 bundles earlier (20260223 / Mozilla 2.82),
+      still present in older bundles.
+  - name: emSign Root TLS CA - G3
+    sha256: 7DD78D5F4F13459A83DFF9ABBBA62EDBAF6F2D102BF257FD712F4D9F2746ED8D
+    cert: emSign_Root_TLS_CA_-_G3.crt
+    note: >-
+      Direct issuer of compromised intermediates; Microsoft-only root store
+      inclusion — on Linux only present if manually added.
+  - name: emSign Root CS CA - G3
+    sha256: F2EDAAFF3D9B701FB4D14C9F285F8C0BAD90FC3BCC1FA07D47F4718EDABA34A5
+    cert: emSign_Root_CS_CA_-_G3.crt
+    note: >-
+      Direct issuer of compromised intermediates; Microsoft-only root store
+      inclusion — on Linux only present if manually added.
+
+# Test sites chained to the distrusted roots (advisory "Does your client still
+# trust the compromised intermediates?" section). Used by the optional
+# post-remediation s_client connectivity check.
+emudhra_ca_test_sites:
+  - dv-g3b-emudhra.we-have-a-problem.com.
+  - dv-g3b-aaa-emudhra.we-have-a-problem.com.
