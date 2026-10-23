@@ -2,7 +2,7 @@
 # eMudhra SCA e2e harness — drives playbooks against Docker containers.
 #
 # Usage: tests/e2e/emudhra-ca/run.sh <scenario> [--images <csv>]
-#   Scenarios: smoke | vars | detect | remediate | fallback | wrapper | clean | mixed | unsupported | extended | all
+#   Scenarios: smoke | vars | detect | remediate | fallback | airgapped | airgapped-rhel | wrapper | clean | mixed | unsupported | extended | all
 #   Default images: ubuntu:22.04,ubuntu:24.04,rockylinux:9,debian:12,almalinux:9
 #
 #   Rocky 8 is NOT in the default matrix: its repos ship no dnf bindings for
@@ -25,10 +25,33 @@
 
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+# Resolve the COMPONENT root (ansible.cfg marker): works both in the
+# standalone repo layout and the monorepo (crusoe-cs-ansible/ subdir).
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+while [ ! -f "$REPO_ROOT/ansible.cfg" ] && [ "$REPO_ROOT" != "/" ]; do
+  REPO_ROOT="$(dirname "$REPO_ROOT")"
+done
+[ -f "$REPO_ROOT/ansible.cfg" ] || { echo "[e2e] cannot locate the component root (ansible.cfg)" >&2; exit 1; }
 E2E_DIR="${REPO_ROOT}/tests/e2e/emudhra-ca"
 INVENTORY=""  # set per-scenario by write_inventory (parallel-safe)
-ANSIBLE="${REPO_ROOT}/.venv/bin/ansible-playbook"
+# The worktree may have no .venv; fall back to the main checkout's
+# (the monorepo worktrees share the parent repo's environment).
+# The venv lives in the MAIN checkout (worktrees don't have one);
+# search the component root's siblings for a checkout with a venv.
+find_ansible_venv() {
+  local bin="$1"
+  [ -x "${REPO_ROOT}/.venv/bin/${bin}" ] && { echo "${REPO_ROOT}/.venv/bin/${bin}"; return; }
+  local d
+  for d in "$(dirname "$REPO_ROOT")"/crusoe-cs-ansible \
+            "$HOME/git/crusoe-cs-ansible"; do
+    [ -x "${d}/.venv/bin/${bin}" ] && { echo "${d}/.venv/bin/${bin}"; return; }
+  done
+  echo ""
+}
+ANSIBLE="$(find_ansible_venv ansible-playbook)"
+[ -n "$ANSIBLE" ] || { echo "[e2e] no ansible-playbook venv found (looked in ${REPO_ROOT}, siblings, \$HOME/git/crusoe-cs-ansible)" >&2; exit 1; }
+ANSIBLE_ADHOC="$(find_ansible_venv ansible)"
 DEFAULT_IMAGES="ubuntu:22.04,ubuntu:24.04,rockylinux:9,debian:12,almalinux:9"
 CONTAINERS=()
 
@@ -162,7 +185,7 @@ run_playbook_ok() {
 run_ansible() {
   export ANSIBLE_CACHE_PLUGIN=memory
   export ANSIBLE_CONFIG="${REPO_ROOT}/ansible.cfg"
-  "${REPO_ROOT}/.venv/bin/ansible" -i "${INVENTORY}" "$@"
+  "${ANSIBLE_ADHOC}" -i "${INVENTORY}" "$@"
 }
 
 down_container() {
@@ -710,6 +733,107 @@ scenario_fallback() {
   log "fallback: PASS"
 }
 
+# Air-gapped: apt has NO egress (update and download fail outright —
+# harsher than the held-package proxy above). The role must TOLERATE
+# the failed upgrade and still reach the `!`-prefix fallback, which
+# needs no egress. This is the advisory's workaround for hosts without
+# updated packages.
+scenario_airgapped() {
+  local images="$1"
+  local image name out conf_entry
+  local -a debian_images=()
+  for image in ${images//,/ }; do
+    case "$image" in ubuntu:*|debian:*) debian_images+=("$image") ;;
+    esac
+  done
+  [[ ${#debian_images[@]} -gt 0 ]] || die "airgapped: no Debian-family image in matrix"
+  image="${debian_images[0]}"
+  name="emudhra-e2e-airgapped-1"
+  up_container "$name" "$image"
+  bootstrap_python "$name"
+  # Break apt's egress: every http/https fetch dies (DNS failure).
+  docker exec "$name" sh -c 'printf "Acquire::http::Proxy \"http://127.0.0.1:9\";\nAcquire::https::Proxy \"http://127.0.0.1:9\";\n" > /etc/apt/apt.conf.d/99-airgap'
+  log "airgapped: ${name}: apt egress severed (dead proxy)"
+  # Inject the root PACKAGE-STYLE so the manual-copy removal cannot
+  # clear it — the fallback must be the only path.
+  docker exec "$name" mkdir -p /usr/share/ca-certificates/mozilla
+  docker cp "${REPO_ROOT}/roles/emudhra_ca/files/certs/emSign_ECC_Root_CA_-_G3.crt" \
+    "${name}:/usr/share/ca-certificates/mozilla/emSign_ECC_Root_CA_-_G3.crt" >/dev/null
+  docker exec "$name" sh -c \
+    'grep -q "^mozilla/emSign_ECC_Root_CA_-_G3.crt$" /etc/ca-certificates.conf || echo "mozilla/emSign_ECC_Root_CA_-_G3.crt" >> /etc/ca-certificates.conf; update-ca-certificates' >/dev/null 2>&1
+  write_inventory "$name"
+
+  out="$(run_playbook "${E2E_DIR}/probe-vars.yml")" || true
+  # The run must SUCCEED despite the failed upgrade (tolerated).
+  echo "$out" | grep -q 'EMUDHRA_SCA_FALLBACK' \
+    || { echo "$out" | tail -40; die "airgapped: ${name}: fallback marker missing — run aborted or fallback did not fire"; }
+  assert_all_roots_absent "$name" \
+    || { echo "$out" | tail -40; die "airgapped: ${name}: bad root still in bundle after fallback"; }
+  conf_entry="$(docker exec "$name" sh -c 'grep -n "^!.*emSign_ECC_Root_CA" /etc/ca-certificates.conf | head -1' || true)"
+  [[ -n "$conf_entry" ]] \
+    || die "airgapped: ${name}: no !-prefixed emSign_ECC entry in /etc/ca-certificates.conf"
+  log "airgapped: ${name}: failed upgrade tolerated, fallback fired, root excised"
+
+  # Idempotency: re-run must be a no-op.
+  out="$(run_playbook "${E2E_DIR}/probe-vars.yml")" || true
+  echo "$out" | grep -q 'changed=[1-9]' \
+    && die "airgapped: ${name}: second run reported changes (not idempotent)"
+  docker exec "$name" sh -c '! grep -q "^!!" /etc/ca-certificates.conf' \
+    || die "airgapped: ${name}: double-! prefix appeared (convergence broken)"
+  log "airgapped: PASS"
+}
+
+# Air-gapped RHEL: dnf has NO egress (update/download fail outright).
+# The role must tolerate the failed upgrade and reach the p11-kit
+# blocklist fallback (blocklist-dir PEMs + update-ca-trust) — no egress
+# needed. Rocky 9 exercises the RedHat-family path.
+scenario_airgapped_rhel() {
+  local images="$1"
+  local image name out
+  local -a rhel_images=()
+  for image in ${images//,/ }; do
+    case "$image" in rockylinux:*|almalinux:*) rhel_images+=("$image") ;;
+    esac
+  done
+  [[ ${#rhel_images[@]} -gt 0 ]] || die "airgapped-rhel: no RedHat-family image in matrix"
+  image="${rhel_images[0]}"
+  name="emudhra-e2e-airgapped-rhel-1"
+  up_container "$name" "$image"
+  bootstrap_python "$name"
+  # Break dnf's egress: every repo fetch dies (unreachable proxy).
+  # dnf 4.x on Rocky 9 ignores /etc/dnf/dnf.conf.d/ drop-ins (verified:
+  # makecache succeeds with a dead proxy there), so the proxy must go
+  # into the main /etc/dnf/dnf.conf.
+  docker exec "$name" sh -c 'printf "\n[main]\nproxy=http://127.0.0.1:9\n" >> /etc/dnf/dnf.conf'
+  log "airgapped-rhel: ${name}: dnf egress severed (dead proxy)"
+  # Inject the root PACKAGE-STYLE into the pki trust source so the
+  # manual-copy removal cannot clear it — the blocklist fallback must
+  # be the only path.
+  docker exec "$name" mkdir -p /usr/share/pki/ca-trust-source
+  docker cp "${REPO_ROOT}/roles/emudhra_ca/files/certs/emSign_ECC_Root_CA_-_G3.crt" \
+    "${name}:/usr/share/pki/ca-trust-source/emSign_ECC_Root_CA_-_G3.crt" >/dev/null
+  docker exec "$name" update-ca-trust >/dev/null 2>&1
+  write_inventory "$name"
+
+  out="$(run_playbook "${E2E_DIR}/probe-vars.yml")" || true
+  # The run must SUCCEED despite the failed upgrade (tolerated), and
+  # the blocklist fallback must have fired (loud marker).
+  echo "$out" | grep -q 'EMUDHRA_SCA_FALLBACK' \
+    || { echo "$out" | tail -40; die "airgapped-rhel: ${name}: fallback marker missing — run aborted or fallback did not fire"; }
+  assert_all_roots_absent "$name" \
+    || { echo "$out" | tail -40; die "airgapped-rhel: ${name}: bad root still in bundle after fallback"; }
+  # The blocklist copy must exist (the fallback's mechanism).
+  docker exec "$name" sh -c 'ls /etc/pki/ca-trust/source/blocklist/ 2>/dev/null | grep -q emSign' \
+    || die "airgapped-rhel: ${name}: no emSign PEM in the blocklist dir"
+  log "airgapped-rhel: ${name}: failed upgrade tolerated, blocklist fallback fired, root excised"
+
+  # Idempotency: re-run must be a no-op.
+  out="$(run_playbook "${E2E_DIR}/probe-vars.yml")" || true
+  echo "$out" | grep -q 'changed=[1-9]' \
+    && die "airgapped-rhel: ${name}: second run reported changes (not idempotent)"
+  log "airgapped-rhel: PASS"
+}
+
 # Detection gate: injected host must report affected with the right
 # fingerprint; pristine and missing-bundle hosts must report clean.
 scenario_detect() {
@@ -814,6 +938,8 @@ main() {
     detect) scenario_detect "$images" ;;
     remediate) scenario_remediate "$images" ;;
     fallback) scenario_fallback "$images" ;;
+    airgapped) scenario_airgapped "$images" ;;
+    airgapped-rhel) scenario_airgapped_rhel "$images" ;;
     wrapper) scenario_wrapper "$images" ;;
     clean) scenario_clean "$images" ;;
     mixed) scenario_mixed "$images" ;;
@@ -825,12 +951,16 @@ main() {
       # each job needs roughly 1GiB of docker-VM memory — size your colima VM
       # accordingly, e.g. colima start --cpu 4 --memory 4 for 3 jobs).
       local jobs="${EMUDHRA_E2E_JOBS:-3}"
-      local sc logf names=(smoke vars detect remediate fallback wrapper clean mixed unsupported extended)
+      local sc logf
+      # Scenario names with dashes cannot be function names; map them to
+      # their underscored functions for the parallel dispatcher.
+      local -A fn_of=( [smoke]=smoke [vars]=vars [detect]=detect [remediate]=remediate [fallback]=fallback [airgapped]=airgapped [airgapped-rhel]=airgapped_rhel [wrapper]=wrapper [clean]=clean [mixed]=mixed [unsupported]=unsupported [extended]=extended )
+      local names=(smoke vars detect remediate fallback airgapped airgapped-rhel wrapper clean mixed unsupported extended)
       local -A pid_of=() status_of=()
       local running=0
       for sc in "${names[@]}"; do
         logf="/tmp/emudhra-e2e-${sc}.log"
-        "scenario_${sc}" "$images" > "$logf" 2>&1 &
+        "scenario_${fn_of[$sc]}" "$images" > "$logf" 2>&1 &
         pid_of[$!]=$sc
         ALL_PIDS="${ALL_PIDS:-}$! "
         running=$((running + 1))

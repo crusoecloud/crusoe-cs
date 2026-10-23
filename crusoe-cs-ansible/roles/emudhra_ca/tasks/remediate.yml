@@ -4,10 +4,28 @@
 # (no version pins), (3) remove manual copies by fingerprint (name-independent),
 # (4) refresh the trust store if anything changed.
 
+# Air-gapped hosts have no egress: the cache refresh and the package
+# upgrade CANNOT succeed there. Both are tolerated (ignore_errors, gated
+# on emudhra_ca_tolerate_missing_egress) so the run continues to the
+# fingerprint-based removal and the verify pass's blocklist fallback —
+# which need no egress (local file ops + update-ca-certificates/
+# update-ca-trust). That fallback is the advisory's official workaround
+# for hosts without updated packages.
+#
+# ignore_errors (not failed_when: false) is deliberate: failed_when
+# zeroes the register's failed flag, so `is failed` can never fire
+# afterwards; ignore_errors preserves it, keeping the tolerated-failure
+# report below honest. changed_when: false keeps a failed upgrade from
+# tripping the refresh gate (a failed op changed nothing). The apt
+# register is kept (lint requires register on ignore_errors tasks) and
+# is available for debugging with -v.
 - name: Refresh apt cache (Debian)
   ansible.builtin.apt:
     update_cache: true
     cache_valid_time: 3600
+  register: emudhra_ca_apt_update
+  ignore_errors: "{{ emudhra_ca_tolerate_missing_egress | bool }}"
+  changed_when: false
   when: ansible_facts['os_family'] == 'Debian'
 
 - name: Upgrade ca-certificates to latest # noqa: package-latest — deliberate: no per-release pins (spec anti-goal); the verify pass handles lagging distros.
@@ -15,8 +33,27 @@
     name: ca-certificates
     state: latest
   register: emudhra_ca_pkg_upgrade
+  ignore_errors: "{{ emudhra_ca_tolerate_missing_egress | bool }}"
+  changed_when: false
+
+- name: Report package upgrade unavailable (air-gapped or repo-lag)
+  ansible.builtin.debug:
+    msg: >-
+      emudhra_ca: package upgrade unavailable
+      ({{ emudhra_ca_pkg_upgrade.msg | default('unknown error') }}) —
+      continuing with the local blocklist fallback (no egress needed)
+  when: emudhra_ca_pkg_upgrade is failed
 
 - name: Find manual CA copies matching distrusted fingerprints
+  # Sweep the admin-writable source dir (family-resolved: Debian
+  # /usr/local/share/ca-certificates, RedHat /etc/pki/ca-trust/source/anchors)
+  # and match by fingerprint — hand-added copies can have any filename.
+  # A directory walk is sufficient here: a copy only reaches the trust
+  # store through one of these dirs, so anything p11-kit trusts from a
+  # hand-added file lives here. (p11-kit's `trust extract` enumeration
+  # was considered and rejected: it dedupes by subject and reports
+  # read-only extract paths that cannot be removed — deletion must
+  # target real source files.)
   ansible.builtin.shell: |
     set -euo pipefail
     bad_fps="{{ emudhra_ca_bad_roots | map(attribute='sha256') | join(' ') }}"
@@ -48,12 +85,6 @@
     emudhra_ca_pkg_upgrade is changed
     or emudhra_ca_manual_removed is changed
 
-- name: Record remediation state
-  ansible.builtin.set_fact:
-    emudhra_ca_remediation_changed: >-
-      {{ emudhra_ca_pkg_upgrade is changed
-         or emudhra_ca_manual_removed is changed }}
-
 - name: Remediation summary
   ansible.builtin.debug:
     msg: "emudhra_ca: remediated {{ emudhra_ca_matched | length }} root(s)"
@@ -74,27 +105,31 @@
 
 # Upgrade-only by construction: the when-gate requires the package to
 # already be installed; never installs. (noqa on the name line below.)
-- name: Upgrade distro certifi package ONLY if already installed (Debian) # noqa: package-latest
-  ansible.builtin.apt:
+# ONE package task (not apt/dnf twins): the package module dispatches to
+# the family's backend itself. ignore_errors mirrors the ca-certificates
+# upgrade above — an air-gapped host cannot upgrade either package, and
+# the in-place excise below is the no-egress path.
+- name: Upgrade distro certifi package ONLY if already installed # noqa: package-latest
+  ansible.builtin.package:
     name: python3-certifi
     state: latest
+  register: emudhra_ca_certifi_upgrade
+  ignore_errors: "{{ emudhra_ca_tolerate_missing_egress | bool }}"
+  changed_when: false
   when:
-    - ansible_facts['os_family'] == 'Debian'
     - emudhra_ca_extended_stores | bool
     - ansible_facts.packages is defined
     - "'python3-certifi' in ansible_facts.packages"
 
-# Upgrade-only by construction: the when-gate requires the package to
-# already be installed; never installs. (noqa on the name line below.)
-- name: Upgrade distro certifi package ONLY if already installed (RedHat) # noqa: package-latest
-  ansible.builtin.dnf:
-    name: python3-certifi
-    state: latest
+- name: Report certifi upgrade unavailable (air-gapped or repo-lag)
+  ansible.builtin.debug:
+    msg: >-
+      emudhra_ca: python3-certifi upgrade unavailable
+      ({{ emudhra_ca_certifi_upgrade.msg | default('unknown error') }}) —
+      continuing with the in-place excise (no egress needed)
   when:
-    - ansible_facts['os_family'] == 'RedHat'
     - emudhra_ca_extended_stores | bool
-    - ansible_facts.packages is defined
-    - "'python3-certifi' in ansible_facts.packages"
+    - emudhra_ca_certifi_upgrade is failed
 
 - name: Report absent certifi (skipped — never install)
   ansible.builtin.debug:
@@ -157,7 +192,7 @@
       [ -f "$ks" ] || continue
       command -v keytool >/dev/null 2>&1 || continue
       d="$(mktemp -d)"
-      keytool -list -rfc -keystore "$ks" -storepass changeit 2>/dev/null \
+      keytool -list -rfc -keystore "$ks" -storepass {{ emudhra_ca_java_keystore_pass }} 2>/dev/null \
         | awk -v d="$d" '
           # Capture the WHOLE alias: keystore aliases may contain spaces,
           # and a truncated alias would make keytool -delete miss (or, worse,
@@ -171,7 +206,7 @@
         alias="$(head -1 "$c" | sed 's/^#//')"
         fp="$(openssl x509 -in "$c" -noout -fingerprint -sha256 2>/dev/null | tr -d ':' | awk -F= '{print toupper($2)}')"
         case " $bad_fps " in
-          *" $fp "*) keytool -delete -alias "$alias" -keystore "$ks" -storepass changeit >/dev/null 2>&1 \
+          *" $fp "*) keytool -delete -alias "$alias" -keystore "$ks" -storepass {{ emudhra_ca_java_keystore_pass }} >/dev/null 2>&1 \
                      && echo "deleted: ${ks}:${alias}" ;;
         esac
       done

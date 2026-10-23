@@ -135,7 +135,7 @@ pipenv run ansible --version
 
 Expected output includes:
 ```
-config file = /path/to/crusoe-sergio/ansible.cfg
+config file = /path/to/repo/ansible.cfg
 ```
 
 - [ ] **Step 5: Commit**

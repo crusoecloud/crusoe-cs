@@ -40,6 +40,9 @@ are cached by Docker.
 | `detect`      | Fingerprint detection: injected→affected, pristine Rocky→affected (real state), missing bundle→clean |
 | `remediate`   | Bad root removed (arbitrary filename), name-similar decoy untouched, idempotent re-run; Rocky exercises the blocklist fallback |
 | `fallback`    | The Debian `!`-prefix fallback actually fires: package held (repo-lag proxy) → root survives the upgrade → fallback excises it, `!`-prefix lands in `/etc/ca-certificates.conf`, re-run idempotent with no `!!` |
+| `airgapped`   | No egress at all: apt update/download fail outright (dead proxy) → the failed upgrade is tolerated → fallback fires, root excised, re-run idempotent. The advisory's workaround for hosts without updated packages. |
+| `airgapped-rhel` | Same air-gap on the RedHat path: Rocky 9 with a dead dnf proxy → failed upgrade tolerated → p11-kit blocklist fallback (blocklist dir + `update-ca-trust`) fires, root excised, re-run idempotent. |
+| `extended`    | certifi bundles: injected root excised in place; images without certifi must NOT get it installed; re-run idempotent. (Java-keystore path is not e2e-covered — needs a JVM in the matrix.) |
 | `wrapper`     | The real playbook works end-to-end; connectivity check skippable |
 | `clean`       | Clean hosts (fixture-constructed) are zero-change no-ops |
 | `mixed`       | One run over a mixed fleet: affected hosts remediated, clean hosts untouched |
@@ -93,3 +96,27 @@ tests/e2e/emudhra-ca/vms.py forensics       # per-VM evidence: versions, logs, h
 Every invocation's full output is saved under `/tmp/emudhra-vm-e2e/<run>/`
 as numbered logs — the empirical transcript kept even (especially) on
 failure. `EMUDHRA_E2E_VM_KEEP=1` skips teardown for debugging.
+
+## Chart smoke
+
+`chart-smoke.py` proves the full `crusoe-distrust-emudhra-ca`
+image-mechanism path on a **real Crusoe cluster**: builds the image from
+the working tree, pushes it to the cluster's native CCR registry,
+helm-installs the chart, and asserts real remediation — pods park with
+`failed=0` (state-tolerant: `changed>=1`+`affected=True` on a fresh
+fleet, `changed=0`+`affected=False` on an already-remediated one), a
+deleted pod's replacement re-runs idempotently with `changed=0`, and the
+journald callback's events are present in the node's journal.
+
+```bash
+tests/e2e/emudhra-ca/chart-smoke.py [--keep]
+```
+
+Every environment-specific value (kube context, CCR location/repo/
+project, namespace, pull secret, image tag) flows from an
+`EMUDHRA_SMOKE_*` env var with a discovery-based default — no hardcoded
+cluster or registry values; the chart itself is discovered from its
+Chart.yaml (`EMUDHRA_SMOKE_CHART` overrides). A different cluster works
+by setting env vars. Requires docker, helm, kubectl, and the crusoe CLI.
+⚠️ It is a real-fleet action: it remediates the target nodes' trust
+stores (idempotent, advisory-mandated) and creates a CCR repo + token.

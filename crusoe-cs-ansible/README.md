@@ -31,6 +31,14 @@ with the `nfs-test` Helm chart.
 
 📖 [`playbooks/nfs/README.md`](playbooks/nfs/README.md)
 
+### eMudhra CA DaemonSet chart
+
+Runs the `emudhra_ca` role against every Kubernetes node's host VM via a
+privileged DaemonSet + chroot — fleet-wide remediation from a single
+`helm install`, no SSH.
+
+📖 [`charts/crusoe-distrust-emudhra-ca/README.md`](charts/crusoe-distrust-emudhra-ca/README.md)
+
 ### Log collection
 
 Collects kernel, journal, kubelet, containerd, and container logs from nodes
@@ -112,6 +120,7 @@ via the `crusoe` CLI and builds these groups, which you pass to playbooks as
 | [`roles/`](roles/) | Roles backing the playbooks |
 | [`inventory/`](inventory/) | Dynamic Crusoe Cloud inventory and `group_vars` |
 | [`charts/`](charts/) | Helm charts used by Kubernetes playbooks |
+| [`images/`](images/) | Container image build contexts (derived images for the charts) |
 | [`tests/`](tests/) | Inventory unit tests and per-playbook e2e suites |
 | [`scripts/`](scripts/) | `bootstrap.sh` (one-time setup) and `anssh <host>` (SSH to a node by inventory name) |
 

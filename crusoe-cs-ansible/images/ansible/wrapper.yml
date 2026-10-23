@@ -1,0 +1,21 @@
+---
+# Wrapper playbook baked into the emudhra-ca DaemonSet chart image.
+# Play 1 runs the role's interpreter pre-flight WITHOUT gathering facts
+# (facts gathering itself needs a working Python on the target; raw needs
+# none). Play 2 runs the role over the chroot connection to the host VM
+# mounted at /host. No become anywhere: the chroot connection does not
+# support privilege escalation, and the pod already runs as root.
+- name: Pre-flight — verify the host VM can run Ansible modules
+  hosts: all
+  gather_facts: false
+  tasks:
+    - name: Run the emudhra_ca interpreter pre-flight
+      ansible.builtin.import_role:
+        name: emudhra_ca
+        tasks_from: preflight.yml
+
+- name: Run emudhra_ca against the host VM
+  hosts: all
+  connection: community.general.chroot
+  roles:
+    - emudhra_ca

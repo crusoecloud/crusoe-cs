@@ -1,8 +1,30 @@
 ---
 # Defaults are overridable by the caller; vars/main.yml is not.
+# ⚠️ The connectivity check opens a TLS connection to the advisory test
+# sites on every run — enabling it makes the run depend on external
+# DNS + egress, and a network blip reads as a canary failure. Keep true
+# only for interactive runs where you want the end-to-end TLS proof;
+# fleet/automated callers should set it false.
 emudhra_ca_run_connectivity_check: true
 emudhra_ca_fail_on_unsupported_family: false
 # Extended trust stores (certifi, Java cacerts): detect/remediate/verify
 # ONLY stores already present on the node — never install python3-certifi
 # or Java when absent (user ruling 2026-10-21).
 emudhra_ca_extended_stores: true
+# Air-gapped hosts: package operations (apt cache refresh, ca-certificates
+# and certifi upgrades) are EXPECTED to fail without egress. When true,
+# those failures are tolerated (ignore_errors) and the run continues to
+# the fingerprint-based removal and the verify pass's blocklist fallback,
+# which need no egress. Set false to make a failed package operation abort
+# the run (e.g. to catch unexpected repo breakage on connected hosts).
+emudhra_ca_tolerate_missing_egress: true
+# Password for the Java cacerts keystores the extended-stores pass scans
+# and edits. The JVM default is 'changeit'; override for hosts with a
+# custom password (a wrong password makes keytool fail silently and the
+# keystore is skipped — see the README's extended-stores section).
+emudhra_ca_java_keystore_pass: changeit
+# Sites chained to the distrusted roots, used by the optional canary.
+# Overridable so a private mirror of the advisory test sites can be used.
+emudhra_ca_test_sites:
+  - dv-g3b-emudhra.we-have-a-problem.com.
+  - dv-g3b-aaa-emudhra.we-have-a-problem.com.

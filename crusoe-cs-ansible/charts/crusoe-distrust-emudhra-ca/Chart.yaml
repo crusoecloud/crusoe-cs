@@ -1,0 +1,6 @@
+apiVersion: v2
+name: crusoe-distrust-emudhra-ca
+description: Distrust the compromised eMudhra root CAs on every k8s node's host VM via chroot
+type: application
+version: 0.1.0
+appVersion: "1.0"

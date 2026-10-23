@@ -1,0 +1,23 @@
+# Keep the Docker build context small and deterministic: only the files
+# the images COPY (roles/emudhra_ca, images/*, plugins) plus the build
+# inputs they need (requirements.yml for the controller image).
+# Everything else is excluded.
+__pycache__/
+*.pyc
+.venv/
+.cache/
+logs/
+tests/
+docs/
+playbooks/
+inventory/
+scripts/
+charts/
+.vscode/
+.*
+Pipfile*
+ansible.cfg
+conftest.py
+hooks/
+!requirements.yml
+README.md

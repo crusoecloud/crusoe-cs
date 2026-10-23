@@ -1,0 +1,147 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ .Release.Name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version }}
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+spec:
+  selector:
+    matchLabels:
+      app: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app: {{ .Release.Name }}
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      terminationGracePeriodSeconds: 0
+      containers:
+        - name: crusoe-distrust-emudhra-ca
+          image: {{ include "crusoe-distrust-emudhra-ca.imageRef" . }}
+          securityContext:
+            privileged: true
+            runAsUser: 0
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            {{- if .Values.journaldLogging }}
+            # Dual logging (crusoe-node-remediation pattern): stdout
+            # (kubectl logs) + the host's journald via the journald_syslog
+            # callback — every task event becomes a structured journal
+            # record, forwarded to the Managed Logs console by the Watch
+            # Agent. The callback disables itself silently when the
+            # socket is absent.
+            - name: ANSIBLE_CALLBACKS_ENABLED
+              value: journald_syslog
+            - name: ANSIBLE_CALLBACK_PLUGINS
+              value: /opt/ansible/plugins/callback
+            - name: ANSIBLE_JOURNALD_IDENTIFIER
+              value: crusoe-distrust-emudhra-ca
+            {{- end }}
+          command:
+            - /bin/bash
+            - -c
+            - |
+              set -euo pipefail
+              # Pod lifecycle events (start / park / fail) come from the
+              # SHELL, not from Ansible — the callback cannot see them.
+              # Write them to the host journal directly via the shared
+              # writer (silent no-op without the socket).
+              {{- if .Values.journaldLogging }}
+              journal_event() {
+                python3 -c '
+                import sys, os
+                sys.path.insert(0, "/opt/ansible/plugins")
+                from module_utils.journald import JournalWriter
+                w = JournalWriter()
+                w.write(os.environ.get("ANSIBLE_JOURNALD_IDENTIFIER", "crusoe-distrust-emudhra-ca"),
+                        sys.argv[1], sys.argv[2],
+                        {"ANSIBLE_STATUS": "POD_" + sys.argv[1].upper(), "POD_NODE": os.environ.get("NODE_NAME", "")})
+                ' "$1" "$2"
+              }
+              journal_event info "[crusoe-distrust-emudhra-ca] ${NODE_NAME}: starting at $(date -u +%FT%TZ)"
+              {{- end }}
+              echo "[crusoe-distrust-emudhra-ca] ${NODE_NAME}: starting at $(date -u +%FT%TZ)"
+              # The image bakes the role, wrapper, and inventory at /opt/ansible.
+              cd /opt/ansible
+              # || rc=$? keeps set -e from exiting before the failure log.
+              rc=0
+              ANSIBLE_ROLES_PATH=/opt/ansible/roles ansible-playbook -i inventory wrapper.yml \
+                -e emudhra_ca_run_connectivity_check={{ .Values.connectivityCheck }} \
+                -e emudhra_ca_fail_on_unsupported_family={{ .Values.failOnUnsupportedFamily }} \
+                -e emudhra_ca_extended_stores={{ .Values.extendedStores }} || rc=$?
+              if [ "$rc" -eq 0 ]; then
+                {{- if .Values.journaldLogging }}
+                journal_event notice "[crusoe-distrust-emudhra-ca] ${NODE_NAME}: playbook succeeded at $(date -u +%FT%TZ); parking"
+                {{- end }}
+                echo "[crusoe-distrust-emudhra-ca] ${NODE_NAME}: playbook succeeded at $(date -u +%FT%TZ); parking"
+                exec sleep infinity
+              else
+                {{- if .Values.journaldLogging }}
+                journal_event err "[crusoe-distrust-emudhra-ca] ${NODE_NAME}: playbook FAILED (rc=${rc}); exiting to CrashLoop"
+                {{- end }}
+                echo "[crusoe-distrust-emudhra-ca] ${NODE_NAME}: playbook FAILED (rc=${rc}); exiting to CrashLoop"
+                exit "$rc"
+              fi
+          volumeMounts:
+            - name: host-root
+              mountPath: /host
+            - name: host-proc
+              mountPath: /host/proc
+            - name: host-sys
+              mountPath: /host/sys
+            - name: host-dev
+              mountPath: /host/dev
+            {{- if .Values.journaldLogging }}
+            # The journald_syslog callback (running on the controller, i.e.
+            # in this pod) writes task events to the host's journald via
+            # the native socket; the Crusoe Watch Agent (Vector) forwards
+            # the journal to the Managed Logs console.
+            - name: journald
+              mountPath: /run/systemd/journal
+              readOnly: true
+            {{- end }}
+      volumes:
+        - name: host-root
+          hostPath:
+            path: /
+            type: Directory
+        - name: host-proc
+          hostPath:
+            path: /proc
+            type: Directory
+        - name: host-sys
+          hostPath:
+            path: /sys
+            type: Directory
+        - name: host-dev
+          hostPath:
+            path: /dev
+            type: Directory
+        {{- if .Values.journaldLogging }}
+        # DirectoryOrCreate: on hosts without a journal dir the kubelet
+        # creates an empty one instead of failing to schedule — the pod
+        # runs, the callback finds no socket and no-ops, and kubectl
+        # logs remains the primary channel (the documented degradation).
+        - name: journald
+          hostPath:
+            path: /run/systemd/journal
+            type: DirectoryOrCreate
+        {{- end }}

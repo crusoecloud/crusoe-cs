@@ -50,7 +50,50 @@
 # resolution absolute (no search-domain surprises), but many servers reject
 # an SNI value ending in '.', which would surface as an unrelated TLS error
 # and fail the check for the wrong reason.
-- name: Confirm sites chained to distrusted roots fail verification
+#
+# Egress pre-check (ONE TCP connect, not per-site): on a host without
+# egress every canary attempt would die as a connect/DNS error — which
+# the failed_when below correctly treats as a failure, aborting the run
+# AFTER a successful remediation. The pre-check skips the canary there
+# instead (the verify pass already proved the roots are gone; the canary
+# is the live-TLS proof, not the remediation check).
+- name: Post-remediation canary — sites chained to distrusted roots must fail verification
+  ansible.builtin.debug:
+    msg: >-
+      skipped: this host was not remediated in this run (affected=False),
+      so there is nothing to canary; the check runs only on hosts the
+      role just remediated
+  when: >-
+    ansible_facts['os_family'] in ['Debian', 'RedHat']
+    and not (emudhra_ca_affected | bool)
+    and emudhra_ca_run_connectivity_check | bool
+
+- name: Canary egress pre-check — one TCP connect to the first test site
+  ansible.builtin.command:
+    cmd: >-
+      timeout 10 bash -c 'exec 3<>/dev/tcp/{{ emudhra_ca_test_sites[0] | regex_replace('\.$', '') }}/443'
+  register: emudhra_ca_canary_egress
+  changed_when: false
+  failed_when: false
+  when: >-
+    ansible_facts['os_family'] in ['Debian', 'RedHat']
+    and emudhra_ca_affected | bool
+    and emudhra_ca_run_connectivity_check | bool
+
+- name: Report canary skipped (no egress to the test sites)
+  ansible.builtin.debug:
+    msg: >-
+      emudhra_ca: canary skipped — no egress to
+      {{ emudhra_ca_test_sites[0] }} (air-gapped host?). The verify pass
+      already proved the distrusted roots are gone; the canary is the
+      live-TLS proof, not the remediation check.
+  when: >-
+    ansible_facts['os_family'] in ['Debian', 'RedHat']
+    and emudhra_ca_affected | bool
+    and emudhra_ca_run_connectivity_check | bool
+    and emudhra_ca_canary_egress.rc | default(1) != 0
+
+- name: Post-remediation canary — sites chained to distrusted roots must fail verification
   ansible.builtin.command:
     cmd: >-
       openssl s_client -connect {{ item }}:443
@@ -65,3 +108,4 @@
     ansible_facts['os_family'] in ['Debian', 'RedHat']
     and emudhra_ca_affected | bool
     and emudhra_ca_run_connectivity_check | bool
+    and emudhra_ca_canary_egress.rc | default(1) == 0

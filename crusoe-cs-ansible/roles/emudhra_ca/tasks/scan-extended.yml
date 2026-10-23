@@ -45,7 +45,7 @@
       # precedes each cert), then openssl fingerprints each — no JVM spawn
       # per alias (that was ~1-2s x ~100 aliases per keystore).
       d="$(mktemp -d)"
-      keytool -list -rfc -keystore "$ks" -storepass changeit 2>/dev/null \
+      keytool -list -rfc -keystore "$ks" -storepass {{ emudhra_ca_java_keystore_pass }} 2>/dev/null \
         | awk -v d="$d" '
           # Capture the WHOLE alias: keystore aliases may contain spaces
           # (e.g. "Alias name: my root ca"), so $3 would truncate it and

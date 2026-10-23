@@ -1,8 +1,14 @@
 ---
 # RedHat-family paths and commands for emudhra_ca.
+# Scan ALL THREE purpose-specific extracted bundles (tls, email, objsign):
+# p11-kit extracts the same source store into per-purpose bundles, and the
+# distrusted roots ship in all three — a host with a clean TLS bundle can
+# still trust the roots for S/MIME or code-signing verification.
 emudhra_ca_bundle_paths:
   - /etc/pki/tls/certs/ca-bundle.crt
   - /etc/pki/tls/certs/ca-bundle.trust.crt
+  - /etc/pki/ca-trust/extracted/pem/email-ca-bundle.pem
+  - /etc/pki/ca-trust/extracted/pem/objsign-ca-bundle.pem
 emudhra_ca_manual_ca_dir: /etc/pki/ca-trust/source/anchors
 emudhra_ca_refresh_cmd: update-ca-trust
 # p11-kit >= 0.25 uses blocklist/; older releases (Rocky 8, EL8) use blacklist/.

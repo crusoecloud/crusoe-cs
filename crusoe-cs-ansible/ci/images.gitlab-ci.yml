@@ -1,0 +1,99 @@
+# ============================================================
+# crusoe-cs-ansible — Container image build & publish
+# ============================================================
+# Builds the component's images and pushes them to ghcr.io under
+# the crusoecloud GitHub org, following the crusoe-watch-agent
+# pattern: docker buildx + dind, PAT auth via protected CI/CD
+# variables GHCR_USERNAME / GHCR_TOKEN.
+#
+# Requires protected CI/CD variables:
+#   GHCR_USERNAME — GitHub username owning the PAT
+#   GHCR_TOKEN    — PAT with write:packages scope
+#
+# NOTE: stages are declared in the monorepo root .gitlab-ci.yml
+# (GitLab's include merge makes the last `stages:` win, so this
+# file must not declare its own).
+# ============================================================
+
+# ------------------------------------------------------------------
+# Ansible image
+# ------------------------------------------------------------------
+# The image that RUNS the playbooks against local/chroot targets
+# (ansible-core + collections + kubernetes client). Its Dockerfile carries
+# a build-time trust-store gate: the build fails if any distrusted eMudhra
+# root (pinned fingerprints from roles/emudhra_ca/vars/main.yml) is present
+# in the system CA bundle or python certifi, or if the advisory's canary
+# sites still verify. The trust e2e re-proves the pushed artifact (see
+# tests/e2e/ansible-image/).
+ansible-image:build:
+  stage: build
+  image: docker:27
+  services:
+    - docker:27-dind
+  variables:
+    DOCKER_HOST: tcp://docker:2375
+    DOCKER_TLS_CERTDIR: ""
+    DOCKER_BUILDKIT: "1"
+    CONTROLLER_IMAGE: "ghcr.io/crusoecloud/crusoe-cs/ansible"
+  before_script:
+    - until docker info > /dev/null 2>&1; do sleep 1; done
+    # Graceful degradation: without the GHCR credentials the job builds
+    # only (no login, no push) — publishing starts when the protected
+    # GHCR_USERNAME/GHCR_TOKEN variables are configured.
+    - |
+      if [ -n "$GHCR_USERNAME" ] && [ -n "$GHCR_TOKEN" ]; then
+        echo "$GHCR_TOKEN" | docker login -u "$GHCR_USERNAME" --password-stdin ghcr.io
+      else
+        echo "GHCR_USERNAME/GHCR_TOKEN not set — build-only (no push)"
+      fi
+    - docker buildx create --use --name multiarch-ansible --driver docker-container
+  script:
+    - |
+      TAGS="--tag ${CONTROLLER_IMAGE}:${CI_COMMIT_SHORT_SHA}"
+      PUSH=""
+      if [ "$CI_COMMIT_BRANCH" = "$CI_DEFAULT_BRANCH" ]; then
+        TAGS="${TAGS} --tag ${CONTROLLER_IMAGE}:latest"
+      fi
+      if [ -n "$GHCR_USERNAME" ] && [ -n "$GHCR_TOKEN" ]; then
+        PUSH="--push"
+      fi
+      if [ -n "$PUSH" ]; then
+        # Multi-arch manifest list — push only (the docker exporter
+        # cannot --load a manifest list).
+        docker buildx build \
+          --platform linux/amd64,linux/arm64 \
+          --push ${TAGS} \
+          -f crusoe-cs-ansible/images/ansible/Dockerfile \
+          crusoe-cs-ansible
+        # Print the pushed digest: the chart's default image pin
+        # (values.yaml) is updated from this line after each publish.
+        echo "PUSHED DIGEST (pin this in charts/crusoe-distrust-emudhra-ca/values.yaml):"
+        docker buildx imagetools inspect "${CONTROLLER_IMAGE}:${CI_COMMIT_SHORT_SHA}" \
+          | grep -E '^\s+Digest:' || true
+      else
+        # No credentials: build-only (amd64, the runner's arch) so the
+        # image is at least proven to build.
+        docker buildx build \
+          --platform linux/amd64 \
+          --load ${TAGS} \
+          -f crusoe-cs-ansible/images/ansible/Dockerfile \
+          crusoe-cs-ansible
+      fi
+    # NOTE: the trust e2e (tests/e2e/ansible-image/test_trust.py) is
+    # NOT run in CI — its meaningful checks (live TLS) need egress the
+    # runner doesn't have, and the fingerprint scans it would run are
+    # already covered by the Dockerfile's build-time trust gate. Run it
+    # locally where egress exists.
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      changes:
+        - crusoe-cs-ansible/images/ansible/**/*
+        - crusoe-cs-ansible/roles/emudhra_ca/**/*
+        - crusoe-cs-ansible/plugins/**/*
+        - crusoe-cs-ansible/requirements.yml
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+      changes:
+        - crusoe-cs-ansible/images/ansible/**/*
+        - crusoe-cs-ansible/roles/emudhra_ca/**/*
+        - crusoe-cs-ansible/plugins/**/*
+        - crusoe-cs-ansible/requirements.yml

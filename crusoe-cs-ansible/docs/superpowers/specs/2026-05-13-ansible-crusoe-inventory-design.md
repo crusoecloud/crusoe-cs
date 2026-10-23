@@ -24,7 +24,7 @@
 ## Repository Structure
 
 ```
-crusoe-sergio/
+repo/
 ├── .python-version          # pyenv interpreter pin (3.12.x)
 ├── Pipfile                  # pipenv manifest
 ├── Pipfile.lock             # locked dependency tree

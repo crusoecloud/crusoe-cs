@@ -48,8 +48,5 @@ emudhra_ca_bad_roots:
       inclusion — on Linux only present if manually added.
 
 # Test sites chained to the distrusted roots (advisory "Does your client still
-# trust the compromised intermediates?" section). Used by the optional
-# post-remediation s_client connectivity check.
-emudhra_ca_test_sites:
-  - dv-g3b-emudhra.we-have-a-problem.com.
-  - dv-g3b-aaa-emudhra.we-have-a-problem.com.
+# trust the compromised intermediates?" section) live in defaults/main.yml as
+# emudhra_ca_test_sites — overridable by the caller (vars/main.yml is not).

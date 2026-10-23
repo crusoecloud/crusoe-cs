@@ -1,0 +1,4 @@
+# One-host inventory baked into the emudhra-ca DaemonSet chart image.
+# The pod mounts the host VM's root at /host; the chroot connection
+# targets it, with the host's python3 inside.
+host-vm ansible_connection=community.general.chroot ansible_host=/host ansible_python_interpreter=/usr/bin/python3

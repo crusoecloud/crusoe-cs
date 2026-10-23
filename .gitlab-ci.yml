@@ -1,0 +1,43 @@
+---
+# ============================================================
+# crusoe-cs — Monorepo CI entrypoint
+# ============================================================
+# GitLab only reads the root .gitlab-ci.yml; component configs
+# under crusoe-cs-*/ are pulled in here. Keep this file thin —
+# each component owns its own jobs and rules.
+#
+# The stage list lives here (single source of truth): GitLab
+# replaces the whole stage list with the last `stages:` seen
+# across includes, so component files must not declare stages.
+# The Container-Scanning template requires a `test` stage.
+# ============================================================
+
+stages:
+  - validate
+  - build
+
+include:
+  - local: crusoe-cs-ansible/.gitlab-ci.yml
+  - local: crusoe-cs-ansible/ci/images.gitlab-ci.yml
+
+# Container scanning (Jobs/Container-Scanning template) returns with
+# the test stage once the GHCR_USERNAME/GHCR_TOKEN protected variables
+# are configured — the scan needs the pushed image.
+
+# Container scanning (Jobs/Container-Scanning template) returns with
+# the test stage once the GHCR_USERNAME/GHCR_TOKEN protected variables
+# are configured — the scan needs the pushed image. Re-add then:
+#   variables:
+#     CS_IMAGE: "ghcr.io/crusoecloud/crusoe-cs/ansible:${CI_COMMIT_SHORT_SHA}"
+#   container_scanning:
+#     rules:
+#       - if: '$GHCR_TOKEN == null || $GHCR_USERNAME == null'
+#         when: never
+#       - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+#         changes:
+#           - crusoe-cs-ansible/images/ansible/**/*
+#           - crusoe-cs-ansible/requirements.yml
+#       - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+#         changes:
+#           - crusoe-cs-ansible/images/ansible/**/*
+#           - crusoe-cs-ansible/requirements.yml

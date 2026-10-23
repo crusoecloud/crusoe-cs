@@ -90,7 +90,70 @@ Per host, in order:
    two runtime stores most commonly found on fleet hosts; the advisory
    lists many more — see the scope warning above.)
 6. **Connectivity canary** (optional, default on) — proves sites chained
-   to the distrusted roots now *fail* verification.
+   to the distrusted roots now *fail* verification. A single egress
+   pre-check gates it: no route to the test sites → skipped with an
+   explanatory message, not a failure.
+
+## Air-gapped environments (no internet)
+
+The role's preferred remediation is upgrading the `ca-certificates`
+package — that needs egress. On hosts **without internet access** the
+upgrade cannot succeed, and the role degrades gracefully:
+
+1. The apt cache refresh and the package upgrades (`ca-certificates`
+   and, where installed, `python3-certifi`) are **tolerated failures**
+   — the run continues instead of aborting. Controlled by
+   `emudhra_ca_tolerate_missing_egress` (default `true`).
+2. Removal of manually-installed copies (fingerprint-matched) still
+   runs — it needs no egress.
+3. The verify pass re-scans the bundle; if the distrusted roots
+   survive (they will — no updated package arrived), the role applies
+   the advisory's official **local distrust workaround**:
+   - **Debian/Ubuntu:** `!`-prefixes the matching entries in
+     `/etc/ca-certificates.conf` and runs `update-ca-certificates`.
+   - **RedHat family:** copies the matching root PEMs into the p11-kit
+     blocklist dir and runs `update-ca-trust`.
+   Both are local operations — no egress required.
+4. The final scan must come back clean or the run fails loudly.
+
+### Manual workaround (if you cannot run the playbook)
+
+The advisory documents the same steps by hand — for reference, on
+Debian/Ubuntu as root:
+
+```bash
+sed -i \
+  -e 's|^mozilla/emSign_ECC_Root_CA_-_G3.crt|!&|' \
+  -e 's|^mozilla/Comodo_AAA_Services_root.crt|!&|' \
+  /etc/ca-certificates.conf && update-ca-certificates
+```
+
+On Fedora/RHEL/CentOS Stream/Rocky/AlmaLinux as root:
+
+```bash
+d=/etc/pki/ca-trust/source/blocklist; [ -d $d ] || d=/etc/pki/ca-trust/source/blacklist
+trust extract --overwrite --format=pem-bundle \
+  --filter='pkcs11:object=Comodo%20AAA%20Services%20root;type=cert' \
+  $d/Comodo_AAA_Services_root.pem &&
+trust extract --overwrite --format=pem-bundle \
+  --filter='pkcs11:object=emSign%20ECC%20Root%20CA%20-%20G3;type=cert' \
+  $d/emSign_ECC_Root_CA_-_G3.pem &&
+update-ca-trust
+```
+
+If you use the Java certificate store, sync it after the Debian
+workaround (the role's extended-stores pass handles Java keystores it
+finds — using `emudhra_ca_java_keystore_pass`, default `changeit`; a
+keystore with a custom password is skipped silently — but a
+system-store sync keeps them consistent):
+
+```bash
+touch /var/lib/ca-certificates-java/fresh
+dpkg-reconfigure ca-certificates-java
+```
+
+Full advisory workarounds (macOS, Windows, Alpine, openSUSE, Arch,
+NixOS): <https://emudhra.we-have-a-problem.com/#workarounds>
 
 ## Prerequisites
 
@@ -308,9 +371,12 @@ ansible-playbook playbooks/emudhra-ca/distrust-emudhra-roots.yml \
 | Variable | Default | Description |
 |---|---|---|
 | `target_hosts` | *(required)* | Inventory host or group to remediate |
-| `emudhra_ca_run_connectivity_check` | `true` | Live `s_client` canary on remediated hosts |
+| `emudhra_ca_run_connectivity_check` | `true` | Live `s_client` canary on remediated hosts. A single egress pre-check gates it: on a host with no route to the test sites the canary is skipped with an explanatory message (the verify pass already proved the roots are gone) instead of failing the run. |
 | `emudhra_ca_fail_on_unsupported_family` | `false` | Fail instead of skip on non-Debian/RedHat families |
 | `emudhra_ca_extended_stores` | `true` | Remediate certifi + Java cacerts where present (never installs) |
+| `emudhra_ca_tolerate_missing_egress` | `true` | Air-gapped hosts: failed package operations (apt cache refresh, ca-certificates/certifi upgrades) are tolerated and the run continues to the local blocklist fallback. Set `false` to make a failed package operation abort the run (catch unexpected repo breakage on connected hosts). |
+| `emudhra_ca_java_keystore_pass` | `changeit` | Password for the Java cacerts keystores the extended-stores pass scans/edits (the JVM default). A wrong password makes keytool fail silently and that keystore is skipped. |
+| `emudhra_ca_test_sites` | the 2 advisory canary sites | Sites the canary connects to. Overridable — e.g. point at a private mirror of the advisory test sites. |
 
 ## Safety properties
 

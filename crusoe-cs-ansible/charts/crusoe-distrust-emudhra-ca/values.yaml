@@ -1,0 +1,64 @@
+# -- Container image: the derived ansible image (the repo's ONE image —
+#    controller AND DaemonSet payload; role + wrapper + inventory +
+#    callback plugins baked at /opt/ansible).
+#
+#    ⚠️ PIN BY DIGEST — never a floating tag: a fleet install must run
+#    exactly the bytes that were reviewed.
+#
+#    Resolution order (first match wins):
+#      1. --set image.full=<ref>          (explicit escape hatch)
+#      2. the values below (all three required)
+#    The assembled ref MUST be digest-pinned (@sha256:...); the chart
+#    fails loudly if nothing resolves.
+#
+#    PERMANENT default (once the first ghcr publish lands):
+#      registry:   ghcr.io/crusoecloud
+#      repository: crusoe-cs/ansible
+#      digest:     sha256:<set by the ansible-controller:build job>
+#
+#    Until then, set all three to YOUR registry's digest-pinned ref
+#    (env: --set image.registry=... image.repository=... image.digest=...).
+image:
+  # Explicit full image reference (overrides registry/repository/digest).
+  full: ""
+  registry: ""
+  repository: ""
+  digest: ""
+
+# -- Run the role's connectivity check (passes through to
+#    emudhra_ca_run_connectivity_check).
+#    The canary opens a TLS connection to the advisory test sites on
+#    every pod start. A single egress pre-check gates it: with no route
+#    to the test sites the canary is skipped with an explanatory
+#    message, not a failure. Keep false anyway — a pod start should not
+#    open external TLS connections; enable only for interactive
+#    verification runs. It also only runs on hosts the run actually
+#    remediated (affected=True); clean hosts skip it.
+connectivityCheck: false
+
+# -- CrashLoop on unsupported OS families instead of parking silently
+#    (passes through to emudhra_ca_fail_on_unsupported_family).
+failOnUnsupportedFamily: true
+
+# -- Remediate extended trust stores (certifi, Java cacerts) where
+#    present (passes through to emudhra_ca_extended_stores).
+extendedStores: true
+
+# -- Write structured events (playbook start, every task result, per-host
+#    recap) to the node's systemd journal via the journald_syslog callback
+#    plugin. The Crusoe Watch Agent (Vector) forwards journald entries to
+#    the Crusoe Managed Logs console — filter by SYSLOG_IDENTIFIER=
+#    crusoe-distrust-emudhra-ca there. The callback runs on the controller
+#    (the pod), so the chart mounts the host's journald socket at
+#    /run/systemd/journal; on hosts without it the callback disables
+#    itself silently and kubectl logs remains the primary channel.
+journaldLogging: true
+
+# Restrict to specific nodes (e.g. the k8s nodepool).
+# Leave empty to run on all nodes.
+nodeSelector: {}
+#  node-role.kubernetes.io/worker: ""
+
+tolerations: []
+
+imagePullSecrets: []

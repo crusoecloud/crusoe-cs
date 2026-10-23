@@ -4,10 +4,11 @@
 # Validates all YAML and Ansible content on every MR and push
 # to main. Extend with 'test' and 'deploy' stages as the repo
 # grows.
+#
+# NOTE: stages are declared in the monorepo root .gitlab-ci.yml
+# (GitLab's include merge makes the last `stages:` win, so this
+# file must not declare its own).
 # ============================================================
-
-stages:
-  - validate
 
 # ------------------------------------------------------------------
 # Reusable rule sets
@@ -30,9 +31,11 @@ yaml-lint:
   image: pipelinecomponents/yamllint:latest
   extends: .rules-mr-and-main
   script:
-    # Lint all YAML files; a .yamllint config at the repo root
-    # can be used to tune rules (line length, truthy values, etc.)
-    - yamllint .
+    # Lint all YAML files. cd into the component: its .yamllint
+    # (line-length 160, charts/ ignored) lives there — running from
+    # the monorepo root would pick up yamllint's defaults (80 chars,
+    # error level) and flag everything.
+    - cd crusoe-cs-ansible && yamllint .
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
@@ -47,13 +50,20 @@ yaml-lint:
 # are enabled/skipped without touching this job definition.
 ansible-lint:
   stage: validate
-  image: pipelinecomponents/ansible-lint:latest
+  image: python:3.14-slim
   extends: .rules-mr-and-main
   script:
-    # ansible-lint auto-discovers playbooks and roles; pass '.'
-    # to scan the entire repository. Add '--profile production'
-    # once the codebase is mature enough for stricter checks.
-    - ansible-lint .
+    # Install the repo's OWN pinned toolchain (Pipfile.lock): the
+    # floating pipelinecomponents image carries an ansible-lint/ansible-
+    # core combo whose syntax-check errors on the playbooks'
+    # mandatory()-in-hosts pattern (a false positive the repo's pinned
+    # versions tolerate). cd into the component: its .ansible-lint and
+    # ansible.cfg (roles_path etc.) live there.
+    - pip install --quiet "ansible-lint==26.4.0" "ansible-core==2.20.6"
+    # ANSIBLE_CONFIG bypasses ansible's world-writable-dir check (the
+    # checkout dir is 0777 in CI, so ansible.cfg would be ignored and
+    # roles_path lost → the syntax-check can't resolve roles).
+    - cd crusoe-cs-ansible && ANSIBLE_CONFIG=$PWD/ansible.cfg ansible-lint .
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
