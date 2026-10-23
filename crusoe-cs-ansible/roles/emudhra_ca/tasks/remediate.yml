@@ -15,10 +15,12 @@
 # ignore_errors (not failed_when: false) is deliberate: failed_when
 # zeroes the register's failed flag, so `is failed` can never fire
 # afterwards; ignore_errors preserves it, keeping the tolerated-failure
-# report below honest. changed_when: false keeps a failed upgrade from
-# tripping the refresh gate (a failed op changed nothing). The apt
-# register is kept (lint requires register on ignore_errors tasks) and
-# is available for debugging with -v.
+# report below honest. changed_when restores the module's native changed
+# detection (suppressed by neither failed_when nor a blanket false) while
+# keeping a FAILED upgrade from tripping the refresh gate: a partial
+# install can report changed=true AND failed=true, and `is not failed`
+# gates that out. The apt register is kept (lint requires register on
+# ignore_errors tasks) and is available for debugging with -v.
 - name: Refresh apt cache (Debian)
   ansible.builtin.apt:
     update_cache: true
@@ -34,7 +36,7 @@
     state: latest
   register: emudhra_ca_pkg_upgrade
   ignore_errors: "{{ emudhra_ca_tolerate_missing_egress | bool }}"
-  changed_when: false
+  changed_when: emudhra_ca_pkg_upgrade is not failed and emudhra_ca_pkg_upgrade.changed
 
 - name: Report package upgrade unavailable (air-gapped or repo-lag)
   ansible.builtin.debug:
@@ -115,7 +117,7 @@
     state: latest
   register: emudhra_ca_certifi_upgrade
   ignore_errors: "{{ emudhra_ca_tolerate_missing_egress | bool }}"
-  changed_when: false
+  changed_when: emudhra_ca_certifi_upgrade is not failed and emudhra_ca_certifi_upgrade.changed
   when:
     - emudhra_ca_extended_stores | bool
     - ansible_facts.packages is defined
