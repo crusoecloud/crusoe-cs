@@ -21,9 +21,12 @@
 image:
   # Explicit full image reference (overrides registry/repository/digest).
   full: ""
-  registry: ""
-  repository: ""
-  digest: ""
+  registry: ghcr.io/crusoecloud
+  repository: crusoe-cs/ansible
+  # Multi-arch index digest of the public ghcr publish built from the
+  # latest main pipeline (commit 9077e209, pipeline #85). Re-pin from
+  # the ansible-image:build job output after each publish.
+  digest: sha256:0494d3684643749c847b80aa40d4a2cf46a48142ee28a6903b20da06ea572dae
 
 # -- Run the role's connectivity check (passes through to
 #    emudhra_ca_run_connectivity_check).

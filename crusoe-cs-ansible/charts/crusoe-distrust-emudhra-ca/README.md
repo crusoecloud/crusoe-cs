@@ -34,12 +34,15 @@ helm uninstall crusoe-distrust-emudhra-ca -n <namespace>
 
 ### CCR tenants: override the image
 
-Until the first ghcr publish, the chart's default image points at a
-CCR build in a specific location/project. Tenants with their own CCR
-must override it with their own digest-pinned ref:
+The chart's default image is the **public** ghcr publish
+(`ghcr.io/crusoecloud/crusoe-cs/ansible@sha256:...` — no pull secret
+needed). Tenants whose clusters can pull from ghcr.io need no override.
+Only tenants whose clusters **cannot reach ghcr.io** (egress-restricted
+to their own CCR) must mirror the image into their registry and override
+with their own digest-pinned ref:
 
 ```bash
---set image=registry.<your-location>.ccr.crusoecloudcompute.com/<your-repo>.<your-project8>/ansible@sha256:<digest>
+--set image.full=registry.<your-location>.ccr.crusoecloudcompute.com/<your-repo>.<your-project8>/ansible@sha256:<digest>
 ```
 
 ### Canary rollout (one node first)
@@ -63,13 +66,13 @@ what you don't want long-term.
 
 | Value | Default | Description |
 |---|---|---|
-| `image` | CCR image pinned by `@sha256:` digest | Derived image (role + wrapper + inventory baked at `/opt/ansible`). **Always pin by digest** — a floating tag could silently run different bytes than the ones reviewed. Re-pin after each CI publish (see the values.yaml comment). |
+| `image` | Public ghcr image pinned by `@sha256:` digest | Derived image (role + wrapper + inventory baked at `/opt/ansible`). **Always pin by digest** — a floating tag could silently run different bytes than the ones reviewed. Re-pin after each CI publish (see the values.yaml comment). Clusters that cannot reach ghcr.io (e.g. egress-restricted CCR tenants) override with their own digest-pinned ref via `--set image.full=` (see [CCR tenants](#ccr-tenants-override-the-image)). |
 | `connectivityCheck` | `false` | Opt-in live `s_client` canary on remediated hosts. A single egress pre-check gates it: with no route to the test sites the canary is skipped with an explanatory message, not a failure. Keep `false` anyway — a pod start should not open external TLS connections; enable only for interactive verification runs. Only runs on hosts the run remediated. |
 | `failOnUnsupportedFamily` | `true` | CrashLoop on nodes outside the supported OS families (Debian: Ubuntu/Debian; RedHat: Rocky/AlmaLinux/RHEL) instead of parking silently. |
 | `extendedStores` | `true` | Also remediate certifi bundles and Java cacerts **where already present** (never installs them). |
 | `nodeSelector` | `{}` | Restrict to specific nodes. |
 | `tolerations` | `[]` | Toleration passthrough (control-plane taints are the installer's call). |
-| `imagePullSecrets` | `[]` | **Required for the default CCR image** — create a docker-registry secret for `registry.<location>.ccr.crusoecloudcompute.com` (e.g. from a `crusoe registry tokens create` token) and reference it here. Only a public ghcr image needs none. |
+| `imagePullSecrets` | `[]` | Not needed for the default public ghcr image. **Required when overriding `image.full` with a CCR ref** — CCR is private, so create a docker-registry secret for `registry.<location>.ccr.crusoecloudcompute.com` (username: your Crusoe account email, password: a token from `crusoe registry tokens create`) and reference it here. |
 
 ## Re-running
 
@@ -100,15 +103,15 @@ A remediation path for unsupported OSes is out of scope.
 
 - CI builds the image **from the merge commit** (tag = commit SHA) on
   every chart/image change — the bytes that run are the bytes reviewed.
-- The `crusoe-distrust-emudhra-ca:publish` job pushes the multi-arch
-  image to the **public** `ghcr.io/crusoecloud/crusoe-distrust-emudhra-ca`
-  on the default branch and prints the pushed digest — update the
-  chart's `values.yaml` pin from that output in the same MR flow.
+- The `ansible-image:build` job pushes the multi-arch image to the
+  **public** `ghcr.io/crusoecloud/crusoe-cs/ansible` on the default
+  branch and prints the pushed digest — update the chart's
+  `values.yaml` pin from that output in the same MR flow.
   Requires the protected `GHCR_USERNAME`/`GHCR_TOKEN` CI/CD variables
   (PAT with `write:packages` on the crusoecloud org).
-- Until the first ghcr push, the chart's default points at the CCR
-  build (digest-pinned); installs need a pull secret — override with
-  `--set image=` if your registry differs.
+- The chart's default points at the public ghcr publish
+  (digest-pinned); installs need no pull secret. Override with
+  `--set image.full=` if your registry differs.
 - Fleet installs pin the image **by digest** (`@sha256:`), never a
   floating tag.
 - Local builds are for the [chart smoke](../../tests/e2e/emudhra-ca/) only,
