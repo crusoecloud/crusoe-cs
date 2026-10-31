@@ -119,6 +119,20 @@
     and cve_2026_98432_node.resources[0].metadata.labels
         [cve_2026_98432_mode_label] | default('') == ''
 
+- name: Create the mode state directory
+  # The persist below runs BEFORE the nftables config dir-create task
+  # further down. Stock Ubuntu ships only /etc/nftables.conf (no
+  # /etc/nftables/ dir), so a fresh node failed here with "Destination
+  # directory does not exist" and the rule never loaded (found live,
+  # CMK Ubuntu 22.04). mkdir -p semantics: idempotent.
+  ansible.builtin.file:
+    path: "{{ cve_2026_98432_mode_state_path | dirname }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  when: cve_2026_98432_mode == 'auto'
+
 - name: Persist the resolved mode (the API-outage fallback state)
   # Written on every successful label resolution; the host filesystem
   # survives pod restarts. The guard/load tasks run AFTER this, so the

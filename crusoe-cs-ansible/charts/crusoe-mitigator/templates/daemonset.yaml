@@ -130,6 +130,13 @@ spec:
               mountPath: /host/sys
             - name: host-dev
               mountPath: /host/dev
+            # /etc/nftables does not exist on stock Ubuntu (the package
+            # ships only /etc/nftables.conf); the role persists the mode
+            # state there BEFORE its own dir-create task runs, so a fresh
+            # node fails on first run. DirectoryOrCreate has the kubelet
+            # create it (found live, CMK Ubuntu 22.04).
+            - name: host-nftables
+              mountPath: /host/etc/nftables
             {{- if .Values.journaldLogging }}
             # The journald_syslog callback (running on the controller, i.e.
             # in this pod) writes task events to the host's journald via the
@@ -261,6 +268,10 @@ spec:
           hostPath:
             path: /dev
             type: Directory
+        - name: host-nftables
+          hostPath:
+            path: /etc/nftables
+            type: DirectoryOrCreate
         {{- if .Values.journaldLogging }}
         # DirectoryOrCreate: on hosts without a journal dir the kubelet
         # creates an empty one instead of failing to schedule — the pod
