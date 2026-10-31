@@ -9,5 +9,8 @@ echo "→ yamllint"
 find . -path './.venv' -prune -o \( -name '*.yml' -o -name '*.yaml' \) -print \
   | xargs "${YAMLLINT}"
 
+echo "→ unit tests"
+"${VENV}/python" -m pytest tests/ -q
+
 echo "→ ansible-lint"
 "${ANSIBLE_LINT}" .

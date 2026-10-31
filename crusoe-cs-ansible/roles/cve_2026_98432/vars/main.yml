@@ -1,0 +1,28 @@
+---
+# Fixed names — not overridable. The table name is the contract the
+# metrics script and the removal procedure key off.
+cve_2026_98432_table: cve_2026_98432
+cve_2026_98432_ruleset_path: /etc/nftables/cve-2026-98432.nft
+# Pod-native delivery runs in the pod's own filesystem; the HOST-side
+# copies (visible to every container via the /host mount and to the
+# reconciler sidecar) live under /host. The role resolves the active
+# path per delivery mode (tasks/main.yml).
+cve_2026_98432_host_root: /host
+cve_2026_98432_ruleset_host_path: /host/etc/nftables/cve-2026-98432.nft
+# The last-known-mode state (API-outage fallback): persisted next to
+# the host-side ruleset on every successful label resolution; read
+# when the k8s API is unreachable so the resolved mode always matches
+# the loaded table (no flip during an outage or a restart inside one).
+cve_2026_98432_mode_state_path: /host/etc/nftables/cve-2026-98432.mode
+cve_2026_98432_unit: cve-2026-98432.service
+cve_2026_98432_metrics_script: /usr/local/sbin/cve-2026-98432-metrics.sh
+cve_2026_98432_metrics_unit: cve-2026-98432-metrics.service
+cve_2026_98432_metrics_timer: cve-2026-98432-metrics.timer
+cve_2026_98432_prom_path: /var/lib/node_exporter/cve_2026_98432.prom
+# Chart-owned metrics hostPath (k8s nodes without node_exporter): the
+# metrics sidecar serves this directory on :19698. The role creates it;
+# the metrics script writes here when the node_exporter dir is absent.
+# Pod-native: the HOST-side dir (via /host) — the sidecar mounts the
+# hostPath, not the container's own /var/lib.
+cve_2026_98432_metrics_host_dir: /var/lib/crusoe-mitigator
+cve_2026_98432_metrics_host_dir_pod: /host/var/lib/crusoe-mitigator

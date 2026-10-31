@@ -41,6 +41,35 @@ yaml-lint:
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
 
 # ------------------------------------------------------------------
+# unit tests
+# ------------------------------------------------------------------
+# Runs the pytest suite (inventory plugin, mitigator entrypoint, netns
+# reconciler). pytest is already in the Pipfile dev packages; install
+# the pinned toolchain so the job matches local runs.
+unit_tests:
+  stage: validate
+  image: python:3.14-slim
+  extends: .rules-mr-and-main
+  script:
+    # helm: the chart-template tests render the chart via `helm template`
+    # (skipped with a warning when absent — but CI runs them for real).
+    # python-based fetch: the slim image has no curl/wget.
+    - >
+      python -c "import urllib.request; urllib.request.urlretrieve(
+      'https://get.helm.sh/helm-v3.16.4-linux-amd64.tar.gz', '/tmp/helm.tgz')"
+    - tar -xzf /tmp/helm.tgz -C /tmp && mv /tmp/linux-amd64/helm /usr/local/bin/helm
+    - pip install --quiet "pytest" "ansible-core==2.20.6" "ruff>=0.8" "black"
+    # Formatter: Black (the repo standard; ruff format is Black-parity
+    # but diverges on rare trailing-comment wraps — Black is canonical).
+    - cd crusoe-cs-ansible
+    # Formatter: Black (the repo standard; ruff format is Black-parity
+    # but diverges on rare trailing-comment wraps — Black is canonical).
+    - black --check images/ roles/cve_2026_98432/files/ scripts/ tests/
+    # Linter: ruff (E/W/F/I; E501 off — wrapping is Black's job).
+    - ruff check --no-fix images/ roles/cve_2026_98432/files/ scripts/ tests/
+    - python -m pytest tests/ -q
+
+# ------------------------------------------------------------------
 # ansible-lint
 # ------------------------------------------------------------------
 # Enforces Ansible best practices across all playbooks and roles.

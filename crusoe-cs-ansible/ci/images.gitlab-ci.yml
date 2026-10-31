@@ -1,12 +1,19 @@
 # ============================================================
 # crusoe-cs-ansible — Container image build & publish
 # ============================================================
-# Builds the component's images and pushes them to ghcr.io under
-# the crusoecloud GitHub org, following the crusoe-watch-agent
-# pattern: docker buildx + dind, PAT auth via protected CI/CD
-# variables GHCR_USERNAME / GHCR_TOKEN.
+# Builds the component's image once (multi-arch) and pushes to two
+# registries with different policies:
 #
-# Requires protected CI/CD variables:
+#   1. GitLab project registry ($CI_REGISTRY_IMAGE/crusoe-cs-ansible)
+#      — pushed on EVERY pipeline (MR + branches + main), authenticated
+#      with the CI job token. This is the branch-level artifact used
+#      for cluster validation: copy it to the Crusoe registry (or
+#      side-load) to test an MR image without touching GHCR.
+#   2. ghcr.io/crusoecloud/crusoe-cs/ansible — pushed ONLY on the
+#      default branch, PAT auth via protected CI/CD variables
+#      GHCR_USERNAME / GHCR_TOKEN. Publishing policy is main-only.
+#
+# Requires protected CI/CD variables (main-branch publish only):
 #   GHCR_USERNAME — GitHub username owning the PAT
 #   GHCR_TOKEN    — PAT with write:packages scope
 #
@@ -35,49 +42,56 @@ ansible-image:build:
     DOCKER_TLS_CERTDIR: ""
     DOCKER_BUILDKIT: "1"
     CONTROLLER_IMAGE: "ghcr.io/crusoecloud/crusoe-cs/ansible"
+    # GitLab project registry — job-token auth, pushed on every pipeline
+    # so MR images are testable without touching the main-only GHCR path.
+    GL_REGISTRY_IMAGE: "${CI_REGISTRY_IMAGE}/crusoe-cs-ansible"
   before_script:
     - until docker info > /dev/null 2>&1; do sleep 1; done
-    # Graceful degradation: without the GHCR credentials the job builds
-    # only (no login, no push) — publishing starts when the protected
-    # GHCR_USERNAME/GHCR_TOKEN variables are configured.
+    # GitLab project registry: always available via the CI job token.
+    - echo "$CI_JOB_TOKEN" | docker login -u gitlab-ci-token --password-stdin "$CI_REGISTRY"
+    # Graceful degradation: without the GHCR credentials the job skips
+    # the GHCR push — publishing there starts when the protected
+    # GHCR_USERNAME/GHCR_TOKEN variables are configured (main only).
     - |
       if [ -n "$GHCR_USERNAME" ] && [ -n "$GHCR_TOKEN" ]; then
         echo "$GHCR_TOKEN" | docker login -u "$GHCR_USERNAME" --password-stdin ghcr.io
       else
-        echo "GHCR_USERNAME/GHCR_TOKEN not set — build-only (no push)"
+        echo "GHCR_USERNAME/GHCR_TOKEN not set — skipping GHCR push"
       fi
     - docker buildx create --use --name multiarch-ansible --driver docker-container
   script:
+    # Build once, multi-arch, and push to the GitLab project registry on
+    # every pipeline (MR + branches + main). The MR-pipeline image is the
+    # branch-level artifact: copy it to the Crusoe registry for cluster
+    # validation (see docs/runbooks/cve-2026-98432-rollout.md Stage 0).
     - |
-      TAGS="--tag ${CONTROLLER_IMAGE}:${CI_COMMIT_SHORT_SHA}"
-      PUSH=""
-      if [ "$CI_COMMIT_BRANCH" = "$CI_DEFAULT_BRANCH" ]; then
-        TAGS="${TAGS} --tag ${CONTROLLER_IMAGE}:latest"
-      fi
-      if [ -n "$GHCR_USERNAME" ] && [ -n "$GHCR_TOKEN" ]; then
-        PUSH="--push"
-      fi
-      if [ -n "$PUSH" ]; then
-        # Multi-arch manifest list — push only (the docker exporter
-        # cannot --load a manifest list).
+      docker buildx build \
+        --platform linux/amd64,linux/arm64 \
+        --push \
+        --tag ${GL_REGISTRY_IMAGE}:${CI_COMMIT_SHORT_SHA} \
+        --tag ${GL_REGISTRY_IMAGE}:${CI_COMMIT_REF_SLUG} \
+        -f crusoe-cs-ansible/images/ansible/Dockerfile \
+        crusoe-cs-ansible
+      echo "GITLAB REGISTRY IMAGE (branch validation):"
+      docker buildx imagetools inspect "${GL_REGISTRY_IMAGE}:${CI_COMMIT_SHORT_SHA}" \
+        | grep -E '^\s+Digest:' || true
+    # GHCR publish: main branch only, and only when credentials exist.
+    - |
+      if [ "$CI_COMMIT_BRANCH" = "$CI_DEFAULT_BRANCH" ] && [ -n "$GHCR_USERNAME" ] && [ -n "$GHCR_TOKEN" ]; then
         docker buildx build \
           --platform linux/amd64,linux/arm64 \
-          --push ${TAGS} \
+          --push \
+          --tag ${CONTROLLER_IMAGE}:${CI_COMMIT_SHORT_SHA} \
+          --tag ${CONTROLLER_IMAGE}:latest \
           -f crusoe-cs-ansible/images/ansible/Dockerfile \
           crusoe-cs-ansible
         # Print the pushed digest: the chart's default image pin
         # (values.yaml) is updated from this line after each publish.
-        echo "PUSHED DIGEST (pin this in charts/crusoe-distrust-emudhra-ca/values.yaml):"
+        echo "PUSHED DIGEST (pin this in charts/crusoe-mitigator/values.yaml):"
         docker buildx imagetools inspect "${CONTROLLER_IMAGE}:${CI_COMMIT_SHORT_SHA}" \
           | grep -E '^\s+Digest:' || true
       else
-        # No credentials: build-only (amd64, the runner's arch) so the
-        # image is at least proven to build.
-        docker buildx build \
-          --platform linux/amd64 \
-          --load ${TAGS} \
-          -f crusoe-cs-ansible/images/ansible/Dockerfile \
-          crusoe-cs-ansible
+        echo "GHCR push skipped (main-only policy / credentials not set)"
       fi
     # NOTE: the trust e2e (tests/e2e/ansible-image/test_trust.py) is
     # NOT run in CI — its meaningful checks (live TLS) need egress the
@@ -85,15 +99,28 @@ ansible-image:build:
     # already covered by the Dockerfile's build-time trust gate. Run it
     # locally where egress exists.
   rules:
+    # Run on MR pipelines when the image contents change — the GitLab
+    # registry push gives a testable branch artifact.
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
       changes:
         - crusoe-cs-ansible/images/ansible/**/*
-        - crusoe-cs-ansible/roles/emudhra_ca/**/*
+        - crusoe-cs-ansible/roles/**/*
+        - crusoe-cs-ansible/playbooks/**/*
         - crusoe-cs-ansible/plugins/**/*
         - crusoe-cs-ansible/requirements.yml
     - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
       changes:
         - crusoe-cs-ansible/images/ansible/**/*
-        - crusoe-cs-ansible/roles/emudhra_ca/**/*
+        - crusoe-cs-ansible/roles/**/*
+        - crusoe-cs-ansible/playbooks/**/*
+        - crusoe-cs-ansible/plugins/**/*
+        - crusoe-cs-ansible/requirements.yml
+    # Branch pipelines (non-MR) with image changes: still push to the
+    # GitLab registry so branch work is testable before an MR exists.
+    - if: '$CI_COMMIT_BRANCH'
+      changes:
+        - crusoe-cs-ansible/images/ansible/**/*
+        - crusoe-cs-ansible/roles/**/*
+        - crusoe-cs-ansible/playbooks/**/*
         - crusoe-cs-ansible/plugins/**/*
         - crusoe-cs-ansible/requirements.yml

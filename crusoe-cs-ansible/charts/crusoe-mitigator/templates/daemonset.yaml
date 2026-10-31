@@ -1,0 +1,282 @@
+{{- $hasSidecar := false -}}
+{{- range .Values.mitigations -}}
+{{- if and (kindIs "map" .) (hasKey . "enabled") .enabled (hasKey . "sidecar") (kindIs "map" .sidecar) -}}
+{{- $hasSidecar = true -}}
+{{- end -}}
+{{- end -}}
+{{- $metricsEnabled := eq (include "crusoe-mitigator.metricsEnabled" .) "true" -}}
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ .Release.Name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version }}
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+spec:
+  selector:
+    matchLabels:
+      app: {{ .Release.Name }}
+  # Explicit (the bot review's #6): rolling, one node at a time —
+  # node coverage is never fully lost during an upgrade.
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  template:
+    metadata:
+      labels:
+        app: {{ .Release.Name }}
+      {{- if $metricsEnabled }}
+      annotations:
+        # vmagent's kubernetes-pods discovery job auto-scrapes annotated
+        # pods (150s) and remote-writes to the managed VictoriaMetrics —
+        # no scrape-config change needed anywhere.
+        prometheus.io/scrape: "true"
+        prometheus.io/port: {{ .Values.metricsPort | default 19698 | quote }}
+      {{- end }}
+    # The role reads the node's mode label via the k8s API (the
+    # label IS the rollout state); the watcher makes flips event-driven.
+    spec:
+      serviceAccountName: {{ .Release.Name }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      # K8s label values are strings by API contract; coerce bools and
+      # numbers so an unquoted true (values file) or plain --set (bool)
+      # doesn't reach the API server and fail the apply.
+      nodeSelector:
+        {{- range $key, $value := . }}
+        {{ $key }}: {{ $value | toString | quote }}
+        {{- end }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      # Small grace period: on pod deletion kubelet sends SIGTERM and
+      # the entrypoint drains (in-flight playbook finishes, no new run
+      # starts) — a mid-template-write SIGKILL would leave a
+      # half-written ruleset file for the restart to repair.
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds | default 10 }}
+      {{- if $hasSidecar }}
+      # Sidecars walk /proc for pod netns inodes; they need the HOST's
+      # PID namespace to see container processes.
+      hostPID: true
+      {{- end }}
+      containers:
+        - name: mitigator
+          image: {{ include "crusoe-mitigator.imageRef" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- if and (hasKey .Values "probes") .Values.probes.enabled }}
+          livenessProbe:
+            # The entrypoint process itself: a hung playbook leaves the
+            # process alive but stuck — this catches process death; the
+            # playbook's own failure path is the CrashLoop's job.
+            exec:
+              command: ["sh", "-c", "pgrep -f mitigate.py >/dev/null"]
+            initialDelaySeconds: 30
+            periodSeconds: 60
+          {{- end }}
+          securityContext:
+            privileged: true
+            runAsUser: 0
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  apiVersion: v1
+                  fieldPath: spec.nodeName
+            # One line per enabled mitigation: <name>|<playbook>|<vars>
+            - name: MITIGATIONS
+              value: |-
+                {{- include "crusoe-mitigator.mitigations" . | nindent 16 }}
+            {{- if .Values.mitigationMaxConsecutiveFailures }}
+            - name: MITIGATION_MAX_CONSECUTIVE_FAILURES
+              value: "{{ .Values.mitigationMaxConsecutiveFailures }}"
+            {{- end }}
+            # Event-driven mode flips: the entrypoint watches the
+            # node's mode label; a change forces the scheduled
+            # mitigations due immediately (no pod delete, no interval
+            # wait). The role resolves the mode from the same label.
+            - name: NODE_MODE_WATCH
+              value: "1"
+            - name: NODE_MODE_LABEL
+              value: cve-2026-98432.remediator.crusoe.ai/mode
+            {{- if .Values.journaldLogging }}
+            # Dual logging (crusoe-node-remediation pattern): stdout
+            # (kubectl logs) + the host's journald via the journald_syslog
+            # callback — every task event becomes a structured journal
+            # record, forwarded to the Managed Logs console by the Watch
+            # Agent. The callback disables itself silently when the
+            # socket is absent.
+            - name: ANSIBLE_CALLBACKS_ENABLED
+              value: journald_syslog
+            - name: ANSIBLE_CALLBACK_PLUGINS
+              value: /opt/ansible/plugins
+            - name: ANSIBLE_JOURNALD_IDENTIFIER
+              value: crusoe-mitigator
+            {{- end }}
+          command:
+            - /usr/local/sbin/mitigate.py
+          volumeMounts:
+            - name: host-root
+              mountPath: /host
+            - name: host-proc
+              mountPath: /host/proc
+            - name: host-sys
+              mountPath: /host/sys
+            - name: host-dev
+              mountPath: /host/dev
+            {{- if .Values.journaldLogging }}
+            # The journald_syslog callback (running on the controller, i.e.
+            # in this pod) writes task events to the host's journald via the
+            # native socket; the Crusoe Watch Agent (Vector) forwards the
+            # journal to the Managed Logs console.
+            - name: journald
+              mountPath: /run/systemd/journal
+              readOnly: true
+            {{- end }}
+        {{- range .Values.mitigations }}
+        {{- if and (kindIs "map" .) (hasKey . "enabled") .enabled (hasKey . "sidecar") (kindIs "map" .sidecar) }}
+        - name: {{ .name }}-sidecar
+          image: {{ include "crusoe-mitigator.imageRef" $ }}
+          imagePullPolicy: {{ $.Values.image.pullPolicy }}
+          {{- if and (hasKey $.Values "probes") $.Values.probes.enabled }}
+          livenessProbe:
+            # The heartbeat contract, enforced: the loop touches the
+            # alive-file every sweep; a hung loop (inotify fd leak,
+            # stuck nsenter) fails this and kubelet restarts the
+            # container — restoring netns coverage. A restart
+            # re-discovers everything (idempotent sweeps).
+            exec:
+              command:
+                - sh
+                - -c
+                - >-
+                  awk -v now=$(date +%s)
+                  -v max={{ $.Values.probes.reconcilerAliveMaxAge | default 50 }}
+                  'BEGIN { getline t < "/tmp/cve-2026-98432-alive";
+                  if (now - t > max) exit 1; exit 0 }'
+            initialDelaySeconds: 30
+            periodSeconds: 15
+          {{- end }}
+          securityContext:
+            privileged: true
+            runAsUser: 0
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  apiVersion: v1
+                  fieldPath: spec.nodeName
+            # Pod name for log lines (journald mixes nodes in the
+            # Managed Logs stream; the pod name disambiguates restarts).
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  apiVersion: v1
+                  fieldPath: metadata.name
+            {{- if and (hasKey .sidecar "interval") (kindIs "float64" .sidecar.interval) }}
+            - name: POD_NETNS_INTERVAL
+              value: "{{ .sidecar.interval }}"
+            {{- end }}
+            {{- if eq (include "crusoe-mitigator.metricsEnabled" $) "true" }}
+            # Keep the reconciler's netns.prom destination pinned to the
+            # chart's metricsDir. The reconciler mounts the HOST root at
+            # /host — the HOST-side path is /host/<metricsDir>, which the
+            # metrics-server's hostPath volume serves.
+            - name: METRICS_DIR
+              value: "/host{{ $.Values.metricsDir | default "/var/lib/crusoe-mitigator" }}"
+            {{- end }}
+          command:
+            - {{ .sidecar.command }}
+          volumeMounts:
+            # Sidecars chroot to /host for host tooling and walk /proc
+            # (hostPID gives them the host's PID namespace).
+            - name: host-root
+              mountPath: /host
+            - name: host-proc
+              mountPath: /host/proc
+        {{- end }}
+        {{- end }}
+        {{- if $metricsEnabled }}
+        - name: metrics-server
+          image: {{ include "crusoe-mitigator.imageRef" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- if and (hasKey .Values "probes") .Values.probes.enabled }}
+          livenessProbe:
+            # GET /metrics — the exact path vmagent/GMP scrapes. A
+            # passing probe proves the evidence path; a hung server
+            # would serve stale metrics (false Gate-1 PASSes).
+            httpGet:
+              path: /metrics
+              port: {{ .Values.metricsPort | default 19698 }}
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            timeoutSeconds: {{ .Values.probes.metricsTimeoutSeconds | default 3 }}
+          readinessProbe:
+            httpGet:
+              path: /metrics
+              port: {{ .Values.metricsPort | default 19698 }}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          {{- end }}
+          securityContext:
+            runAsUser: 0
+          command:
+            - python3
+            - /usr/local/sbin/serve-metrics.py
+            - --dir
+            - {{ .Values.metricsDir | default "/var/lib/crusoe-mitigator" }}
+            - --port
+            - {{ .Values.metricsPort | default 19698 | quote }}
+          volumeMounts:
+            # The generators (metrics.sh per mitigation, the pod-netns
+            # reconciler) write *.prom files here; this sidecar serves
+            # them all on the metricsPort (hostNetwork — one per node).
+            - name: metrics-dir
+              mountPath: {{ .Values.metricsDir | default "/var/lib/crusoe-mitigator" }}
+              readOnly: true
+          ports:
+            - name: metrics
+              containerPort: {{ .Values.metricsPort | default 19698 }}
+        {{- end }}
+      volumes:
+        - name: host-root
+          hostPath:
+            path: /
+            type: Directory
+        - name: host-proc
+          hostPath:
+            path: /proc
+            type: Directory
+        - name: host-sys
+          hostPath:
+            path: /sys
+            type: Directory
+        - name: host-dev
+          hostPath:
+            path: /dev
+            type: Directory
+        {{- if .Values.journaldLogging }}
+        # DirectoryOrCreate: on hosts without a journal dir the kubelet
+        # creates an empty one instead of failing to schedule — the pod
+        # runs, the callback finds no socket and no-ops, and kubectl
+        # logs remains the primary channel (the documented degradation).
+        - name: journald
+          hostPath:
+            path: /run/systemd/journal
+            type: DirectoryOrCreate
+        {{- end }}
+        {{- if $metricsEnabled }}
+        # Chart-owned metrics hostPath: the role creates it on the host;
+        # generators write *.prom here; the metrics-server sidecar
+        # serves them on the metricsPort.
+        - name: metrics-dir
+          hostPath:
+            path: {{ .Values.metricsDir | default "/var/lib/crusoe-mitigator" }}
+            type: DirectoryOrCreate
+        {{- end }}

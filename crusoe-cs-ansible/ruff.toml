@@ -1,0 +1,25 @@
+# Ruff: the LINTER (the formatter is Black — CI runs `black --check`;
+# ruff format is Black-parity except rare trailing-comment wraps, so
+# Black is canonical). The IDE reads this file for the lint rules.
+
+# Black-style line length (Black's default; wider than pycodestyle's
+# 79 — the repo's existing code clusters well under it).
+line-length = 88
+target-version = "py314"
+
+[format]
+# Black-style formatting, quote-style included.
+quote-style = "double"
+indent-style = "space"
+
+[lint]
+# Start from Black-adjacent defaults; add the style rules the IDE was
+# already flagging (pycodestyle's E/W) so editor and CI agree.
+select = ["E", "W", "F", "I"]
+# E501 (line-too-long) is the formatter's job — `ruff format` wraps;
+# the check would fight the formatter on edge cases.
+ignore = ["E501"]
+
+[lint.isort]
+# Match the existing import style (stdlib, then third-party).
+known-first-party = []

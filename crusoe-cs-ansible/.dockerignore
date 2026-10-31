@@ -1,7 +1,6 @@
-# Keep the Docker build context small and deterministic: only the files
-# the images COPY (roles/emudhra_ca, images/*, plugins) plus the build
-# inputs they need (requirements.yml for the controller image).
-# Everything else is excluded.
+# Keep the Docker build context small and deterministic: the roles,
+# playbooks, wrappers, and plugins the image bakes, plus the build
+# inputs (requirements.yml). Everything else is excluded.
 __pycache__/
 *.pyc
 .venv/
@@ -9,7 +8,6 @@ __pycache__/
 logs/
 tests/
 docs/
-playbooks/
 inventory/
 scripts/
 charts/

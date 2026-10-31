@@ -82,8 +82,8 @@ def chart_name() -> str:
             m = re.search(r"^name:\s*(\S+)", content, re.M)
             if m:
                 return m.group(1)
-    die("could not discover the emudhra chart under charts/ — "
-        "set EMUDHRA_SMOKE_CHART")
+    die("could not discover the emudhra chart under charts/ — set EMUDHRA_SMOKE_CHART")
+
 
 KEEP = "--keep" in sys.argv
 
@@ -99,12 +99,22 @@ def die(msg: str) -> None:
     sys.exit(1)
 
 
-def run(cmd: list[str], *, check: bool = True, input_text: str | None = None,
-        env: dict | None = None, quiet: bool = False) -> subprocess.CompletedProcess:
+def run(
+    cmd: list[str],
+    *,
+    check: bool = True,
+    input_text: str | None = None,
+    env: dict | None = None,
+    quiet: bool = False,
+) -> subprocess.CompletedProcess:
     """Run a command; optionally raise on failure. Never uses a shell."""
     return subprocess.run(
-        cmd, check=check, input=input_text, env=env,
-        capture_output=True, text=True,
+        cmd,
+        check=check,
+        input=input_text,
+        env=env,
+        capture_output=True,
+        text=True,
     )
 
 
@@ -116,6 +126,7 @@ def out(cmd: list[str], **kwargs) -> str:
 # ---------------------------------------------------------------------------
 # 0. Resolve values (env var wins, discovery-based default otherwise)
 # ---------------------------------------------------------------------------
+
 
 def require_tool(name: str) -> None:
     if run(["which", name], check=False).returncode != 0:
@@ -137,28 +148,49 @@ def context_user(context: str) -> str:
 
 def discover_ccr_location(cluster: str) -> str:
     """The cluster record carries the authoritative location field."""
-    listing = json.loads(out(["crusoe", "kubernetes", "clusters", "list", "--format", "json"]))
+    listing = json.loads(
+        out(["crusoe", "kubernetes", "clusters", "list", "--format", "json"])
+    )
     for c in listing:
         if c["name"] == cluster:
             return c["location"]
-    die(f"could not discover the CCR location for cluster '{cluster}' — "
-        "set EMUDHRA_SMOKE_CCR_LOCATION")
+    die(
+        f"could not discover the CCR location for cluster '{cluster}' — "
+        "set EMUDHRA_SMOKE_CCR_LOCATION"
+    )
 
 
-def resolve_ccr_repo(repo_name: str, location: str, project_env: str) -> tuple[str, str]:
+def resolve_ccr_repo(
+    repo_name: str, location: str, project_env: str
+) -> tuple[str, str]:
     """Find or create the CCR repo; return (repo_url, full_project_id).
 
     The repo url embeds the project-8: <repo-name>.<project8>.
     """
-    listing = json.loads(out(["crusoe", "registry", "repositories", "list", "--format", "json"]))
+    listing = json.loads(
+        out(["crusoe", "registry", "repositories", "list", "--format", "json"])
+    )
     repo_url = next((r["url"] for r in listing if r["name"] == repo_name), "")
     if not repo_url:
         log(f"CCR repo {repo_name} absent — creating ({location}, standard)")
-        created = json.loads(out([
-            "crusoe", "registry", "repositories", "create",
-            "--name", repo_name, "--location", location,
-            "--mode", "standard", "--format", "json",
-        ]))
+        created = json.loads(
+            out(
+                [
+                    "crusoe",
+                    "registry",
+                    "repositories",
+                    "create",
+                    "--name",
+                    repo_name,
+                    "--location",
+                    location,
+                    "--mode",
+                    "standard",
+                    "--format",
+                    "json",
+                ]
+            )
+        )
         repo_url = created["url"]
         if not repo_url:
             die("could not read repo url from create output")
@@ -171,8 +203,10 @@ def resolve_ccr_repo(repo_name: str, location: str, project_env: str) -> tuple[s
     projects = json.loads(out(["crusoe", "projects", "list", "--format", "json"]))
     full = next((p["id"] for p in projects if p["id"].startswith(project8)), "")
     if not full:
-        die(f"could not discover the full project id for prefix {project8} — "
-            "set EMUDHRA_SMOKE_CCR_PROJECT")
+        die(
+            f"could not discover the full project id for prefix {project8} — "
+            "set EMUDHRA_SMOKE_CCR_PROJECT"
+        )
     return repo_url, full
 
 
@@ -183,16 +217,21 @@ def main() -> None:
     current = current_kube_context()
     kube_context = os.environ.get("EMUDHRA_SMOKE_KUBE_CONTEXT", current)
     if kube_context != current:
-        die(f"kube context {kube_context} is not the current context ({current}) — "
-            f"kubectl config use-context {kube_context} first")
+        die(
+            f"kube context {kube_context} is not the current context ({current}) — "
+            f"kubectl config use-context {kube_context} first"
+        )
     user = context_user(kube_context)
     if not user.startswith("crusoe-client-admin-"):
-        die(f"kube context '{kube_context}' (user '{user or '<none>'}') is not backed "
+        die(
+            f"kube context '{kube_context}' (user '{user or '<none>'}') is not backed "
             "by a crusoe-client-admin-* credential — refusing to run against an "
-            "unknown cluster")
+            "unknown cluster"
+        )
 
-    ccr_location = os.environ.get("EMUDHRA_SMOKE_CCR_LOCATION", "") \
-        or discover_ccr_location(kube_context)
+    ccr_location = os.environ.get(
+        "EMUDHRA_SMOKE_CCR_LOCATION", ""
+    ) or discover_ccr_location(kube_context)
     chart = chart_name()
     chart_dir = os.path.join(CHARTS_DIR, chart)
     dockerfile = os.path.join(IMAGES_DIR, chart, "Dockerfile")
@@ -218,14 +257,15 @@ def main() -> None:
     log(f"  kube context:  {kube_context}")
     log(f"  CCR location:  {ccr_location}")
     log(f"  CCR repo:      {ccr_repo}")
-    log(f"  CCR project:   <discovered below>")
+    log("  CCR project:   <discovered below>")
     log(f"  namespace:     {ns}")
     log(f"  release:       {release}")
     log(f"  pull secret:   {pull_secret or '<discovered below>'}")
     log(f"  image tag:     {image_tag}")
 
     repo_url, _project = resolve_ccr_repo(
-        ccr_repo, ccr_location, os.environ.get("EMUDHRA_SMOKE_CCR_PROJECT", ""))
+        ccr_repo, ccr_location, os.environ.get("EMUDHRA_SMOKE_CCR_PROJECT", "")
+    )
     image = f"{repo_url}/{chart}:{image_tag}"
     log(f"CCR repo url: {repo_url}")
     log(f"image: {image}")
@@ -235,9 +275,22 @@ def main() -> None:
     #    Nodes are amd64; build that platform explicitly.
     # ------------------------------------------------------------------
     log(f"building image from working tree: {image} (linux/amd64)")
-    run(["docker", "buildx", "build", "--platform", "linux/amd64", "--load",
-         "-f", dockerfile, "-t", image, REPO_ROOT],
-        check=True)
+    run(
+        [
+            "docker",
+            "buildx",
+            "build",
+            "--platform",
+            "linux/amd64",
+            "--load",
+            "-f",
+            dockerfile,
+            "-t",
+            image,
+            REPO_ROOT,
+        ],
+        check=True,
+    )
     log("build OK")
 
     # ------------------------------------------------------------------
@@ -254,18 +307,38 @@ def main() -> None:
         token_file = tf.name
     os.chmod(token_file, 0o600)
     try:
-        created = json.loads(out([
-            "crusoe", "registry", "tokens", "create",
-            "--alias", f"{chart}-chart-smoke", "--format", "json",
-        ]))
+        created = json.loads(
+            out(
+                [
+                    "crusoe",
+                    "registry",
+                    "tokens",
+                    "create",
+                    "--alias",
+                    f"{chart}-chart-smoke",
+                    "--format",
+                    "json",
+                ]
+            )
+        )
         token_key_id = created.get("key_id", "")
         with open(token_file, "w") as f:
             f.write(created["token"])
         if not os.path.getsize(token_file):
             die("crusoe registry tokens create produced no token")
 
-        run(["docker", "login", ccr_registry, "--username", ccr_user,
-             "--password-stdin"], check=True, input_text=open(token_file).read())
+        run(
+            [
+                "docker",
+                "login",
+                ccr_registry,
+                "--username",
+                ccr_user,
+                "--password-stdin",
+            ],
+            check=True,
+            input_text=open(token_file).read(),
+        )
         log(f"docker login OK (user: {ccr_user})")
 
         log(f"pushing {image}")
@@ -282,26 +355,58 @@ def main() -> None:
             # Discovery: reuse the well-known crusoe-registry-pull secret
             # if it exists in this namespace, else create one named after
             # the release from the fresh CCR token.
-            if run(["kubectl", "get", "secret", "crusoe-registry-pull", "-n", ns],
-                   check=False).returncode == 0:
+            if (
+                run(
+                    ["kubectl", "get", "secret", "crusoe-registry-pull", "-n", ns],
+                    check=False,
+                ).returncode
+                == 0
+            ):
                 pull_secret = "crusoe-registry-pull"
             else:
                 pull_secret = f"{release}-pull"
-        if run(["kubectl", "get", "secret", pull_secret, "-n", ns],
-               check=False).returncode != 0:
+        if (
+            run(
+                ["kubectl", "get", "secret", pull_secret, "-n", ns], check=False
+            ).returncode
+            != 0
+        ):
             log(f"creating pull secret {pull_secret} in {ns}")
-            run(["kubectl", "create", "secret", "docker-registry", pull_secret,
-                 "-n", ns,
-                 "--docker-server", ccr_registry,
-                 "--docker-username", ccr_user,
-                 "--docker-password", open(token_file).read()],
-                check=True)
+            run(
+                [
+                    "kubectl",
+                    "create",
+                    "secret",
+                    "docker-registry",
+                    pull_secret,
+                    "-n",
+                    ns,
+                    "--docker-server",
+                    ccr_registry,
+                    "--docker-username",
+                    ccr_user,
+                    "--docker-password",
+                    open(token_file).read(),
+                ],
+                check=True,
+            )
 
         log(f"helm install {release} into {ns} (image: {image})")
-        run(["helm", "install", release, chart_dir, "-n", ns,
-             "--set", f"image.full={image}",
-             "--set", f"imagePullSecrets[0].name={pull_secret}"],
-            check=True)
+        run(
+            [
+                "helm",
+                "install",
+                release,
+                chart_dir,
+                "-n",
+                ns,
+                "--set",
+                f"image.full={image}",
+                "--set",
+                f"imagePullSecrets[0].name={pull_secret}",
+            ],
+            check=True,
+        )
 
         # --------------------------------------------------------------
         # 4. Wait event-driven for all pods to be Ready, then for each
@@ -309,12 +414,37 @@ def main() -> None:
         # --------------------------------------------------------------
         node_count = len(out(["kubectl", "get", "nodes", "-o", "name"]).splitlines())
         log(f"waiting for {node_count} pods Ready (event-driven, 600s timeout)")
-        run(["kubectl", "wait", "--for=condition=Ready", "pod",
-             "-l", f"app={release}", "-n", ns, "--timeout=600s"],
-            check=True)
-        ready = len(out(["kubectl", "get", "pods", "-l", f"app={release}", "-n", ns,
-                         "--field-selector", "status.phase=Running",
-                         "-o", "name"]).splitlines())
+        run(
+            [
+                "kubectl",
+                "wait",
+                "--for=condition=Ready",
+                "pod",
+                "-l",
+                f"app={release}",
+                "-n",
+                ns,
+                "--timeout=600s",
+            ],
+            check=True,
+        )
+        ready = len(
+            out(
+                [
+                    "kubectl",
+                    "get",
+                    "pods",
+                    "-l",
+                    f"app={release}",
+                    "-n",
+                    ns,
+                    "--field-selector",
+                    "status.phase=Running",
+                    "-o",
+                    "name",
+                ]
+            ).splitlines()
+        )
         if ready != node_count:
             die(f"expected {node_count} Running pods, found {ready}")
         log(f"all {ready} pods Running")
@@ -322,31 +452,51 @@ def main() -> None:
         def wait_for_recap(pod: str, max_attempts: int = 120) -> bool:
             """Poll for PLAY RECAP (bounded; no fixed long sleeps)."""
             for _ in range(max_attempts):
-                logs = run(["kubectl", "logs", "-n", ns, pod],
-                           check=False).stdout
+                logs = run(["kubectl", "logs", "-n", ns, pod], check=False).stdout
                 if "PLAY RECAP" in logs:
                     return True
-                phase = out(["kubectl", "get", "pod", pod, "-n", ns,
-                             "-o", "jsonpath={.status.phase}"]) if run(
-                    ["kubectl", "get", "pod", pod, "-n", ns],
-                    check=False).returncode == 0 else "Gone"
+                phase = (
+                    out(
+                        [
+                            "kubectl",
+                            "get",
+                            "pod",
+                            pod,
+                            "-n",
+                            ns,
+                            "-o",
+                            "jsonpath={.status.phase}",
+                        ]
+                    )
+                    if run(
+                        ["kubectl", "get", "pod", pod, "-n", ns], check=False
+                    ).returncode
+                    == 0
+                    else "Gone"
+                )
                 if phase != "Running":
                     return False
                 time.sleep(5)
             return False
 
-        all_pods = out(["kubectl", "get", "pods", "-l", f"app={release}", "-n", ns,
-                        "-o", "name"]).splitlines()
+        all_pods = out(
+            ["kubectl", "get", "pods", "-l", f"app={release}", "-n", ns, "-o", "name"]
+        ).splitlines()
         all_pods = [p.removeprefix("pod/") for p in all_pods]
         for pod in all_pods:
             if not wait_for_recap(pod):
-                logs = run(["kubectl", "logs", "-n", ns, pod, "--tail=40"],
-                           check=False).stdout
-                prev = run(["kubectl", "logs", "-n", ns, pod, "--previous",
-                            "--tail=40"], check=False).stdout
+                logs = run(
+                    ["kubectl", "logs", "-n", ns, pod, "--tail=40"], check=False
+                ).stdout
+                prev = run(
+                    ["kubectl", "logs", "-n", ns, pod, "--previous", "--tail=40"],
+                    check=False,
+                ).stdout
                 print(logs, file=sys.stderr)
                 print(prev, file=sys.stderr)
-                die(f"{pod}: playbook never finished (no PLAY RECAP within the wait window)")
+                die(
+                    f"{pod}: playbook never finished (no PLAY RECAP within the wait window)"
+                )
             log(f"{pod}: playbook finished (recap present)")
 
         # --------------------------------------------------------------
@@ -366,13 +516,19 @@ def main() -> None:
                 die(f"{label}: {pod} recap missing changed=N")
             n_changed = int(changed[-1])
             if n_changed >= 1 and "affected=True" in logs:
-                log(f"{label}: {pod} remediated (changed={n_changed}, failed=0, affected=True)")
+                log(
+                    f"{label}: {pod} remediated (changed={n_changed}, failed=0, affected=True)"
+                )
             elif n_changed == 0 and "affected=False" in logs:
-                log(f"{label}: {pod} already clean (changed=0, failed=0, affected=False)")
+                log(
+                    f"{label}: {pod} already clean (changed=0, failed=0, affected=False)"
+                )
             else:
                 print(logs[-1500:], file=sys.stderr)
-                die(f"{label}: {pod} inconsistent recap (changed={n_changed}, "
-                    "expected changed>=1+affected=True or changed=0+affected=False)")
+                die(
+                    f"{label}: {pod} inconsistent recap (changed={n_changed}, "
+                    "expected changed>=1+affected=True or changed=0+affected=False)"
+                )
 
         first_pod = all_pods[0]
         assert_pod_recap(first_pod, "first-run")
@@ -392,25 +548,52 @@ def main() -> None:
         def assert_node_journal(node: str) -> None:
             # The identifier is whatever the chart sets — read it from the
             # rendered template instead of duplicating the literal here.
-            rendered = run(["helm", "template", release, chart_dir, "-n", ns],
-                           check=True).stdout
-            m = re.search(r"value:\s*(\S+)", rendered[rendered.index("ANSIBLE_JOURNALD_IDENTIFIER"):])
+            rendered = run(
+                ["helm", "template", release, chart_dir, "-n", ns], check=True
+            ).stdout
+            m = re.search(
+                r"value:\s*(\S+)",
+                rendered[rendered.index("ANSIBLE_JOURNALD_IDENTIFIER") :],
+            )
             identifier = m.group(1) if m else chart
-            script = (f"grep -c 'SYSLOG_IDENTIFIER={identifier}' "
-                      "/host/var/log/journal/*/*.journal 2>/dev/null "
-                      "| awk -F: '{s+=$NF} END {print s+0}'")
-            p = run(["kubectl", "debug", f"node/{node}", "--image=busybox", "--",
-                     "sh", "-c", script], check=False)
+            script = (
+                f"grep -c 'SYSLOG_IDENTIFIER={identifier}' "
+                "/host/var/log/journal/*/*.journal 2>/dev/null "
+                "| awk -F: '{s+=$NF} END {print s+0}'"
+            )
+            p = run(
+                [
+                    "kubectl",
+                    "debug",
+                    f"node/{node}",
+                    "--image=busybox",
+                    "--",
+                    "sh",
+                    "-c",
+                    script,
+                ],
+                check=False,
+            )
             # kubectl debug is ASYNC: it creates the pod and returns before
             # the command runs. Parse the debug pod's name, wait for it to
             # complete, then read its logs.
             m = re.search(r"Creating debugging pod (\S+)", p.stdout or "")
             if not m:
-                die(f"journald: could not create a debug pod on {node}: "
-                    f"{(p.stderr or p.stdout or '')[-300:]}")
+                die(
+                    f"journald: could not create a debug pod on {node}: "
+                    f"{(p.stderr or p.stdout or '')[-300:]}"
+                )
             debug_pod = m.group(1)
-            run(["kubectl", "wait", "--for=condition=Ready", f"pod/{debug_pod}",
-                 "--timeout=120s"], check=True)
+            run(
+                [
+                    "kubectl",
+                    "wait",
+                    "--for=condition=Ready",
+                    f"pod/{debug_pod}",
+                    "--timeout=120s",
+                ],
+                check=True,
+            )
             # The container may complete between Ready and the log read;
             # poll briefly for non-empty logs (bounded, event-ish).
             logs = ""
@@ -424,11 +607,12 @@ def main() -> None:
                 if line.isdigit():
                     count = int(line)
                     break
-            run(["kubectl", "delete", "pod", debug_pod, "--wait=false"],
-                check=False)
+            run(["kubectl", "delete", "pod", debug_pod, "--wait=false"], check=False)
             if count < 1:
-                die(f"journald: node {node} journal has no {identifier} events "
-                    f"(callback did not write? logs={logs[-300:]})")
+                die(
+                    f"journald: node {node} journal has no {identifier} events "
+                    f"(callback did not write? logs={logs[-300:]})"
+                )
             log(f"journald: node {node} journal has {count} {identifier} events")
 
         def assert_forwarder_healthy(node: str) -> None:
@@ -439,56 +623,128 @@ def main() -> None:
             must have no dropped/fatal events in its recent logs.
             Transient connection-reset WARNs are normal (Vector retries
             from its disk buffer)."""
-            agent_pod = out([
-                "kubectl", "get", "pods", "-n", "crusoe-system",
-                "-l", "app.kubernetes.io/name=crusoe-watch-agent",
-                "--field-selector", f"spec.nodeName={node}",
-                "-o", "jsonpath={.items[0].metadata.name}",
-            ])
+            agent_pod = out(
+                [
+                    "kubectl",
+                    "get",
+                    "pods",
+                    "-n",
+                    "crusoe-system",
+                    "-l",
+                    "app.kubernetes.io/name=crusoe-watch-agent",
+                    "--field-selector",
+                    f"spec.nodeName={node}",
+                    "-o",
+                    "jsonpath={.items[0].metadata.name}",
+                ]
+            )
             if not agent_pod:
                 # Label may differ across versions; fall back to prefix.
-                agent_pod = out([
-                    "kubectl", "get", "pods", "-n", "crusoe-system", "-o", "name",
-                    "--field-selector", f"spec.nodeName={node}",
-                ]).splitlines()
+                agent_pod = out(
+                    [
+                        "kubectl",
+                        "get",
+                        "pods",
+                        "-n",
+                        "crusoe-system",
+                        "-o",
+                        "name",
+                        "--field-selector",
+                        f"spec.nodeName={node}",
+                    ]
+                ).splitlines()
                 agent_pod = next(
-                    (p.removeprefix("pod/") for p in agent_pod
-                     if "watch-agent" in p), "")
+                    (p.removeprefix("pod/") for p in agent_pod if "watch-agent" in p),
+                    "",
+                )
             if not agent_pod:
                 die(f"forwarder: no crusoe-watch-agent pod found on {node}")
-            logs = run(["kubectl", "logs", "-n", "crusoe-system", agent_pod,
-                        "--since=1h"], check=False).stdout
-            bad = [ln for ln in logs.splitlines()
-                   if "crusoe_ingest" in ln
-                   and any(w in ln.lower() for w in ("dropped", "fatal", "gave up"))]
+            logs = run(
+                ["kubectl", "logs", "-n", "crusoe-system", agent_pod, "--since=1h"],
+                check=False,
+            ).stdout
+            bad = [
+                ln
+                for ln in logs.splitlines()
+                if "crusoe_ingest" in ln
+                and any(w in ln.lower() for w in ("dropped", "fatal", "gave up"))
+            ]
             if bad:
                 print("\n".join(bad[-5:]), file=sys.stderr)
-                die(f"forwarder: {agent_pod} on {node} is dropping "
-                    f"crusoe_ingest events ({len(bad)} recent occurrences)")
-            log(f"forwarder: {agent_pod} on {node} healthy "
-                "(no dropped crusoe_ingest events in the last hour)")
+                die(
+                    f"forwarder: {agent_pod} on {node} is dropping "
+                    f"crusoe_ingest events ({len(bad)} recent occurrences)"
+                )
+            log(
+                f"forwarder: {agent_pod} on {node} healthy "
+                "(no dropped crusoe_ingest events in the last hour)"
+            )
 
-        journal_node = out(["kubectl", "get", "pod", first_pod, "-n", ns,
-                            "-o", "jsonpath={.spec.nodeName}"])
+        journal_node = out(
+            [
+                "kubectl",
+                "get",
+                "pod",
+                first_pod,
+                "-n",
+                ns,
+                "-o",
+                "jsonpath={.spec.nodeName}",
+            ]
+        )
         assert_node_journal(journal_node)
         assert_forwarder_healthy(journal_node)
-
 
         # --------------------------------------------------------------
         # 7. Idempotency: delete one pod, wait for replacement, changed=0
         # --------------------------------------------------------------
         log(f"idempotency: deleting {first_pod} and waiting for replacement")
-        node_of_first = out(["kubectl", "get", "pod", first_pod, "-n", ns,
-                             "-o", "jsonpath={.spec.nodeName}"])
-        run(["kubectl", "delete", "pod", first_pod, "-n", ns, "--wait=true"],
-            check=True)
-        run(["kubectl", "wait", "--for=condition=Ready", "pod",
-             "-l", f"app={release}", "-n", ns,
-             "--field-selector", f"spec.nodeName={node_of_first}",
-             "--timeout=600s"], check=True)
-        repl = out(["kubectl", "get", "pods", "-l", f"app={release}", "-n", ns,
-                    "--field-selector", f"spec.nodeName={node_of_first}",
-                    "-o", "name"]).splitlines()
+        node_of_first = out(
+            [
+                "kubectl",
+                "get",
+                "pod",
+                first_pod,
+                "-n",
+                ns,
+                "-o",
+                "jsonpath={.spec.nodeName}",
+            ]
+        )
+        run(
+            ["kubectl", "delete", "pod", first_pod, "-n", ns, "--wait=true"], check=True
+        )
+        run(
+            [
+                "kubectl",
+                "wait",
+                "--for=condition=Ready",
+                "pod",
+                "-l",
+                f"app={release}",
+                "-n",
+                ns,
+                "--field-selector",
+                f"spec.nodeName={node_of_first}",
+                "--timeout=600s",
+            ],
+            check=True,
+        )
+        repl = out(
+            [
+                "kubectl",
+                "get",
+                "pods",
+                "-l",
+                f"app={release}",
+                "-n",
+                ns,
+                "--field-selector",
+                f"spec.nodeName={node_of_first}",
+                "-o",
+                "name",
+            ]
+        ).splitlines()
         repl = [p.removeprefix("pod/") for p in repl]
         if not repl:
             die(f"no replacement pod found on {node_of_first}")
@@ -498,8 +754,7 @@ def main() -> None:
         if not wait_for_recap(replacement):
             die(f"replacement pod {replacement}: playbook never finished")
 
-        repl_logs = run(["kubectl", "logs", "-n", ns, replacement],
-                        check=False).stdout
+        repl_logs = run(["kubectl", "logs", "-n", ns, replacement], check=False).stdout
         if "failed=0" not in repl_logs:
             print(repl_logs[-1500:], file=sys.stderr)
             die(f"idempotency: {replacement} recap missing failed=0")
@@ -512,9 +767,11 @@ def main() -> None:
             die(f"idempotency: {replacement} missing affected=False on re-run")
         log(f"idempotency: {replacement} re-run changed=0, affected=False, failed=0")
 
-        log(f"PASS: {ready}/{node_count} nodes parked; first run remediated "
+        log(
+            f"PASS: {ready}/{node_count} nodes parked; first run remediated "
             "(changed>=1, affected=True); re-run idempotent (changed=0); "
-            "journald events present on the node")
+            "journald events present on the node"
+        )
     finally:
         # The token file held a live credential — always unlink it.
         try:
@@ -525,19 +782,23 @@ def main() -> None:
         # references this token — deleting it would break future pulls
         # on nodes with a cold image cache (the VM-replacement lesson).
         if token_key_id and not KEEP:
-            run(["crusoe", "registry", "tokens", "delete", token_key_id],
-                check=False, capture_output=True)
+            run(
+                ["crusoe", "registry", "tokens", "delete", token_key_id],
+                check=False,
+                capture_output=True,
+            )
             log(f"smoke token {token_key_id} deleted")
         elif token_key_id and KEEP:
-            log(f"--keep: smoke token {token_key_id} left in place "
-                "(the pull secret references it)")
+            log(
+                f"--keep: smoke token {token_key_id} left in place "
+                "(the pull secret references it)"
+            )
         if KEEP:
             log(f"--keep: leaving {ns} installed for inspection")
         else:
             log(f"teardown: helm uninstall {release} + namespace {ns}")
             run(["helm", "uninstall", release, "-n", ns], check=False)
-            run(["kubectl", "delete", "namespace", ns, "--wait=true"],
-                check=False)
+            run(["kubectl", "delete", "namespace", ns, "--wait=true"], check=False)
 
 
 if __name__ == "__main__":
@@ -545,6 +806,8 @@ if __name__ == "__main__":
         main()
     except subprocess.CalledProcessError as e:
         tail = (e.stderr or e.stdout or "")[-1500:]
-        print(f"{log_prefix} FAIL: command failed "
-              f"({' '.join(e.cmd)}): {tail}", file=sys.stderr)
+        print(
+            f"{log_prefix} FAIL: command failed ({' '.join(e.cmd)}): {tail}",
+            file=sys.stderr,
+        )
         sys.exit(1)

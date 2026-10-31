@@ -14,6 +14,7 @@ logs/
 tests/e2e/emudhra-ca/.inventory.ini
 tests/e2e/emudhra-ca/.inventory-*.ini
 tests/e2e/emudhra-ca/.run-*.log
+tests/cve-2026-98432/e2e/inventory.tmp
 
 # agent working scratch (SDD briefs, ledgers)
 .superpowers/

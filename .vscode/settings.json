@@ -1,0 +1,15 @@
+{
+  "python.analysis.lineLength": 88,
+  "python.analysis.diagnosticSeverityOverrides": {
+    "pycodestyle.line-too-long": "none"
+  },
+  "flake8.args": ["--max-line-length=88", "--extend-ignore=E501"],
+  "ruff.enable": true,
+  "ruff.args": ["--config", "${workspaceFolder}/crusoe-cs-ansible/ruff.toml"],
+  "ruff.format.args": ["--config", "${workspaceFolder}/crusoe-cs-ansible/ruff.toml"],
+  "[python]": {
+    "editor.defaultFormatter": "charliermarsh.ruff",
+    "editor.formatOnSave": true
+  },
+  "ruff.lint.enable": true
+}

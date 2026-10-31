@@ -28,11 +28,19 @@ FROM ${BASE}
 
 # Toolchain: bash (scripts assume it), curl (trust-gate HTTPS checks),
 # openssl (trust-gate fingerprint scan), ca-certificates (TLS).
+# nftables + util-linux: pod-native delivery — the mitigator pod runs
+# the image's own nft via netlink against the shared host netns (no
+# chroot into host userspace; works on minimal hosts like COS) and the
+# reconciler's nsenter comes from util-linux.
+# Version-pinned (the security report flags unpinned apk adds):
+# reproducible builds, no surprise upstream changes.
 RUN apk add --no-cache \
-      bash \
-      ca-certificates \
-      curl \
-      openssl
+      bash~5 \
+      ca-certificates=20261020-r0 \
+      curl~8 \
+      openssl~3 \
+      nftables~1 \
+      util-linux~2
 
 # Python dependencies: ansible-core (not the full `ansible` package — that
 # bundles ~100 collections and ~700MB; the component's collections are
@@ -41,14 +49,35 @@ RUN pip install --no-cache-dir "ansible-core>=2.17" "kubernetes"
 
 # Ansible collections — same pins as requirements.yml.
 COPY requirements.yml /tmp/requirements.yml
-RUN ansible-galaxy collection install -r /tmp/requirements.yml \
+# --no-cache: the multi-arch build runs this layer CONCURRENTLY per
+# platform, and ansible-galaxy's shared response cache corrupts under
+# concurrent runs ("Missing expected 'results' in ansible-galaxy
+# cache" — hit twice in CI). The flag is the upstream-recommended
+# workaround; the layer is cached by BuildKit anyway.
+RUN ansible-galaxy collection install --no-cache -r /tmp/requirements.yml \
       -p /usr/share/ansible/collections \
     && rm /tmp/requirements.yml
 
-# Bake the DaemonSet payload: role + wrapper + inventory + the
-# callback plugins (journald logging) at /opt/ansible.
-COPY roles/emudhra_ca/ /opt/ansible/roles/emudhra_ca/
-COPY images/ansible/wrapper.yml images/ansible/inventory /opt/ansible/
+# Bake the DaemonSet payload GENERICALLY: every role, every playbook,
+# every wrapper — the image is a point-in-time snapshot of the repo's
+# remediation catalog. WHICH remedations run is pure chart config
+# (values.yaml's mitigations list names playbooks by path); adding a
+# remediation to the repo needs NO Dockerfile edit, only a rebuild.
+COPY roles/ /opt/ansible/roles/
+COPY playbooks/ /opt/ansible/playbooks/
+COPY images/ansible/*.yml images/ansible/inventory /opt/ansible/
+# Executable payloads: any role file under files/sbin/ lands in PATH
+# (sidecar commands like the pod-netns reconciler reference these
+# paths). The explicit COPY keeps the mode without a build-arg dance.
+COPY --chmod=0755 roles/cve_2026_98432/files/cve-2026-98432-netns-reconcile.py /usr/local/sbin/cve-2026-98432-netns-reconcile.py
+# Generic mitigation entrypoint for the crusoe-mitigator chart: parses
+# the chart-rendered MITIGATIONS list, runs each playbook, parks or
+# CrashLoops. Baked at the path the chart's command expects.
+COPY --chmod=0755 images/ansible/mitigate.py /usr/local/sbin/mitigate.py
+# Generic textfile metrics file-server (chart metrics-server sidecar):
+# serves every *.prom in the chart hostPath on :19698 for vmagent /
+# managed-collection scraping.
+COPY --chmod=0755 images/ansible/serve-metrics.py /usr/local/sbin/serve-metrics.py
 COPY plugins/ /opt/ansible/plugins/
 
 # Non-root runtime user for controller use; playbooks run against
@@ -116,4 +145,9 @@ RUN set -eu; \
     ansible-galaxy collection list | grep -q kubernetes.core
 
 WORKDIR /work
+# The security report flags the missing HEALTHCHECK. The entrypoint
+# parks (sleep) after the mitigations run; the healthcheck proves the
+# supervisor is alive (a hung entrypoint fails it).
+HEALTHCHECK --interval=60s --timeout=10s --start-period=90s \
+  CMD pgrep -f mitigate.py >/dev/null || exit 1
 ENTRYPOINT ["ansible-playbook"]

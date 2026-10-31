@@ -23,10 +23,16 @@ SAMPLE_VMS = [
         "location": "us-northcentral1-a",
         "project_id": "proj-aaa-111",
         "state": "STATE_RUNNING",
-        "network_interfaces": [{"ips": [{
-            "private_ipv4": {"address": "10.0.1.10"},
-            "public_ipv4": {"address": "1.2.3.4"},
-        }]}],
+        "network_interfaces": [
+            {
+                "ips": [
+                    {
+                        "private_ipv4": {"address": "10.0.1.10"},
+                        "public_ipv4": {"address": "1.2.3.4"},
+                    }
+                ]
+            }
+        ],
     },
     {
         "id": "vm-002",
@@ -35,9 +41,15 @@ SAMPLE_VMS = [
         "location": "us-east1-a",
         "project_id": "proj-bbb-222",
         "state": "STATE_RUNNING",
-        "network_interfaces": [{"ips": [{
-            "private_ipv4": {"address": "10.0.2.20"},
-        }]}],
+        "network_interfaces": [
+            {
+                "ips": [
+                    {
+                        "private_ipv4": {"address": "10.0.2.20"},
+                    }
+                ]
+            }
+        ],
     },
     {
         "id": "vm-003",
@@ -111,9 +123,7 @@ def test_nodepool_groups_created():
 def test_k8s_cluster_groups_created():
     vm_to_np = build_vm_to_nodepool(SAMPLE_NODEPOOLS)
     names = build_cluster_names(SAMPLE_CLUSTERS)
-    inv = build_inventory(
-        SAMPLE_VMS, vm_to_nodepool=vm_to_np, cluster_names=names
-    )
+    inv = build_inventory(SAMPLE_VMS, vm_to_nodepool=vm_to_np, cluster_names=names)
     assert "gpu-worker-01" in inv["k8s_prod_cluster"]["hosts"]
     assert "cpu-worker-01" in inv["k8s_prod_cluster"]["hosts"]
 
@@ -152,9 +162,7 @@ def test_hostvars_crusoe_metadata():
 def test_hostvars_nodepool_and_cluster():
     vm_to_np = build_vm_to_nodepool(SAMPLE_NODEPOOLS)
     names = build_cluster_names(SAMPLE_CLUSTERS)
-    inv = build_inventory(
-        SAMPLE_VMS, vm_to_nodepool=vm_to_np, cluster_names=names
-    )
+    inv = build_inventory(SAMPLE_VMS, vm_to_nodepool=vm_to_np, cluster_names=names)
     hv = inv["_meta"]["hostvars"]["gpu-worker-01"]
     assert hv["crusoe_nodepool"] == "gpu_pool"
     assert hv["crusoe_cluster"] == "prod_cluster"
@@ -205,7 +213,7 @@ def _mock_run(data):
 
 
 def test_get_vms_calls_crusoe_cli():
-    with patch("crusoe.subprocess.run", return_value=_mock_run(SAMPLE_VMS)) as mock:  # noqa: E501
+    with patch("crusoe.subprocess.run", return_value=_mock_run(SAMPLE_VMS)) as mock:
         result = get_vms()
         mock.assert_called_once_with(
             ["crusoe", "compute", "vms", "list", "--format", "json"],

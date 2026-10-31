@@ -1,0 +1,19 @@
+{{- if and (eq (include "crusoe-mitigator.metricsEnabled" .) "true") (eq .Values.metricsBackend "gmp") }}
+# GKE managed collection (Managed Service for Prometheus): scrape the
+# same :19698 exposition the vmagent annotation path serves on Crusoe.
+apiVersion: monitoring.googleapis.com/v1
+kind: PodMonitoring
+metadata:
+  name: {{ .Release.Name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version }}
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+spec:
+  selector:
+    matchLabels:
+      app: {{ .Release.Name }}
+  endpoints:
+    - port: metrics
+      interval: 150s
+{{- end }}

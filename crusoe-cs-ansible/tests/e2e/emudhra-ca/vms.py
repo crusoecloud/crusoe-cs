@@ -144,7 +144,7 @@ def run_cmd(
     if check and proc.returncode != 0:
         if not quiet:
             print(proc.stderr, file=sys.stderr)
-        raise RuntimeError(f"command failed ({proc.returncode}): " f"{shlex.join(cmd)}")
+        raise RuntimeError(f"command failed ({proc.returncode}): {shlex.join(cmd)}")
     return proc
 
 
@@ -253,8 +253,7 @@ def cmd_up(images_filter: list[str] | None = None) -> None:
             ]
             for loc in tried:
                 log(
-                    f"up: creating {name} ({row['type']}, "
-                    f"{row['image']}:latest, {loc})"
+                    f"up: creating {name} ({row['type']}, {row['image']}:latest, {loc})"
                 )
                 proc = run_cmd(
                     [
@@ -473,10 +472,7 @@ def scenario_detect(names: list[str], bad_fps: list[str]) -> None:
     out = run_playbook(names, str(E2E_DIR / "probe-vars.yml"))
     save_output("detect", out)
     if "affected=True" not in out:
-        die(
-            "detect: no host reported affected "
-            "(expected: pristine VMs ship the root)"
-        )
+        die("detect: no host reported affected (expected: pristine VMs ship the root)")
     log("detect: PASS")
 
 
@@ -490,7 +486,7 @@ def scenario_remediate(names: list[str], bad_fps: list[str]) -> None:
     save_output("remediate-scan", json.dumps(scans, indent=2, sort_keys=True))
     for host in names:
         assert_all_roots_absent(host, bad_fps, scans)
-    log(f"remediate: all {len(names)} VMs clean " f"(all {len(bad_fps)} roots absent)")
+    log(f"remediate: all {len(names)} VMs clean (all {len(bad_fps)} roots absent)")
 
     out = run_playbook(names, str(E2E_DIR / "probe-vars.yml"))
     save_output("remediate-2-idempotency", out)

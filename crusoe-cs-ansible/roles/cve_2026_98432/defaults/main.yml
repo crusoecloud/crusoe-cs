@@ -1,0 +1,54 @@
+---
+# Defaults are overridable by the caller; vars/main.yml is not.
+#
+# Remove the mitigation once every host runs a kernel with the fix
+# (upstream e3f33b0a1d89, "ipv4: free inet_opt and ireq_opt after an
+# RCU grace period"). Ubuntu jammy: 5.15.0-203.213+; noble: 6.8.0-149.149+.
+#
+# Fail (instead of skip) on OS families without nftables support.
+cve_2026_98432_fail_on_unsupported_family: false
+
+# The ONLY sanctioned path from an enforce table back to observe. The
+# guard (tasks/main.yml) fails an observe run that finds a loaded drop
+# verdict unless this is true — a silent downgrade would re-expose the
+# CVE. Operators set it explicitly for R1 rollback (see the runbook).
+cve_2026_98432_allow_mode_downgrade: false
+
+# Pod-native delivery (design spec §8): the privileged hostNetwork pod
+# runs the role with connection local — nft from the IMAGE via netlink
+# against the shared host netns. No host package manager, no host
+# python, no chroot. The wrapper sets this; the SSH path leaves it
+# false (host tooling via the normal connection).
+cve_2026_98432_pod_native: false
+
+# Mitigation mode. The rollout contract: OBSERVE is the sane default
+# (nothing drops without an explicit operator action); ENFORCE is
+# always explicit.
+#   "auto" (the default): the node's mode label IS the rollout state —
+#     absent label = observe (the Stage-1 fleet default), an explicit
+#     mode=enforce label = enforce (the deliberate operator action),
+#     an explicit mode=observe label = observe + the sanctioned R1
+#     downgrade, an unknown value fails loudly (typo protection).
+#     One release, one pod per node; the chart renders NO mode var
+#     (extra vars would beat the label resolution's set_fact).
+#   "observe"/"enforce": pin the mode explicitly (air-gapped clusters,
+#     the SSH path, a freeze hold) via the entry's vars.
+# Any other value fails the role before the table is touched (see
+# docs/runbooks/cve-2026-98432-rollout.md).
+cve_2026_98432_mode: "auto"
+
+# AUTO mode plumbing: the node to query (the chart sets NODE_NAME) and
+# the label that carries the rollout state (mode=enforce|observe;
+# absent = observe — the fleet default).
+cve_2026_98432_node_name: "{{ lookup('env', 'NODE_NAME') }}"
+cve_2026_98432_mode_label: cve-2026-98432.remediator.crusoe.ai/mode
+
+# Run the live drop probe after loading the rule: a python3 SYN with IP
+# options must time out, and a plain SYN must still connect. Needs
+# python3 on the target. Keep true — it is the end-to-end proof that
+# the rule actually drops on THIS kernel.
+cve_2026_98432_run_probe: true
+
+# Publish node_exporter textfile metrics (rule loaded + drop counter)
+# when /var/lib/node_exporter exists. Never installs node_exporter.
+cve_2026_98432_metrics: true

@@ -38,7 +38,9 @@ import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
-ROLE_VARS = REPO_ROOT / "crusoe-cs-ansible" / "roles" / "emudhra_ca" / "vars" / "main.yml"
+ROLE_VARS = (
+    REPO_ROOT / "crusoe-cs-ansible" / "roles" / "emudhra_ca" / "vars" / "main.yml"
+)
 DEFAULT_IMAGE = "ghcr.io/crusoecloud/crusoe-cs/ansible:latest"
 
 # Advisory canary sites (roles/emudhra_ca/vars/main.yml emudhra_ca_test_sites).

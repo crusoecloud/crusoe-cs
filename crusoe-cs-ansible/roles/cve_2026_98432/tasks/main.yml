@@ -1,0 +1,504 @@
+---
+# Role entrypoint. The interpreter pre-flight lives in tasks/preflight.yml,
+# invoked by the wrapper playbook's gather_facts: false first play — it
+# must run BEFORE facts gathering (which itself needs a working Python).
+
+# A typo'd mode must fail BEFORE the table is touched, not render a
+# broken ruleset.
+- name: Validate the mitigation mode
+  ansible.builtin.fail:
+    msg: >-
+      cve_2026_98432: invalid cve_2026_98432_mode
+      '{{ cve_2026_98432_mode }}' (must be 'observe', 'enforce', or 'auto')
+  when: cve_2026_98432_mode not in ['observe', 'enforce', 'auto']
+
+# AUTO mode: the node's label IS the rollout state. One release, one
+# pod per node — the mode resolves from the node's metadata on every
+# run, so the progressive rollout (canary, waves, rollback) is pure
+# label management. The label carries the mode EXPLICITLY
+# (mode=enforce|observe): self-documenting (kubectl get nodes -L
+# shows the fleet's mode) and typo-safe (unknown values fail loudly).
+# An explicit mode=observe IS the R1 downgrade sanction (the
+# operator's deliberate, audited action — no flag dance).
+- name: Resolve the mode from the node label
+  kubernetes.core.k8s_info:
+    kind: Node
+    name: "{{ cve_2026_98432_node_name }}"
+  register: cve_2026_98432_node
+  when: cve_2026_98432_mode == 'auto'
+  # API-outage resilience: a failed lookup must NOT fail the run (the
+  # scheduled re-run would count it toward the CrashLoop threshold,
+  # and a pod restart during the outage would never converge). The
+  # fallback below resolves the LAST KNOWN mode — the table stays
+  # exactly as loaded; no flip while the API is down.
+  failed_when: false
+
+- name: Read the last known mode (API-outage fallback)
+  # Persisted next to the ruleset on every successful resolution; the
+  # host filesystem survives pod restarts, so a restart during an API
+  # outage resolves the same mode the table already carries.
+  ansible.builtin.slurp:
+    src: "{{ cve_2026_98432_mode_state_path }}"
+  register: cve_2026_98432_last_mode_raw
+  when: >-
+    cve_2026_98432_mode == 'auto'
+    and (cve_2026_98432_node is failed
+         or cve_2026_98432_node.resources | default([]) | length == 0)
+  failed_when: false
+  changed_when: false
+
+- name: Fail if the API is down and no last known mode exists
+  # First-ever run during an outage, or the state file was wiped: no
+  # safe mode to resolve. Fail loudly — the table is untouched (no
+  # flip); the retry cadence re-runs once the API returns.
+  ansible.builtin.fail:
+    msg: >-
+      cve_2026_98432: the k8s API is unreachable and no last known
+      mode exists on {{ inventory_hostname }} — refusing to guess.
+      The loaded table is untouched; re-run once the API responds.
+  when: >-
+    cve_2026_98432_mode == 'auto'
+    and (cve_2026_98432_node is failed
+         or cve_2026_98432_node.resources | default([]) | length == 0)
+    and cve_2026_98432_last_mode_raw is failed
+
+- name: Set mode from the last known state (API outage)
+  # The outage fallback: resolve the persisted mode — the same mode
+  # the table already carries (the state file is written only on
+  # successful resolutions), so the run is a no-op on the table.
+  ansible.builtin.set_fact:
+    cve_2026_98432_resolved_mode: "{{ cve_2026_98432_last_mode_raw.content | b64decode | trim }}"
+    # The persisted mode matches the loaded table; a same-mode re-run
+    # needs no downgrade sanction (the guard compares verdicts).
+    cve_2026_98432_api_outage: true
+  when: >-
+    cve_2026_98432_mode == 'auto'
+    and (cve_2026_98432_node is failed
+         or cve_2026_98432_node.resources | default([]) | length == 0)
+    and cve_2026_98432_last_mode_raw is not failed
+
+- name: Set mode=enforce (the label says enforce)
+  # set_fact CANNOT overwrite the chart's -e cve_2026_98432_mode=auto
+  # (extra vars beat set_fact) — the resolved mode lives in its own
+  # var; every downstream task reads the RESOLVED mode.
+  ansible.builtin.set_fact:
+    cve_2026_98432_resolved_mode: enforce
+  when: >-
+    cve_2026_98432_mode == 'auto'
+    and cve_2026_98432_node is not failed
+    and cve_2026_98432_node.resources | default([]) | length > 0
+    and cve_2026_98432_node.resources[0].metadata.labels
+        [cve_2026_98432_mode_label] | default('') == 'enforce'
+
+- name: Set mode=observe (the label says observe)
+  # The explicit observe label IS the downgrade sanction: the operator
+  # set it deliberately — the audited R1 action.
+  ansible.builtin.set_fact:
+    cve_2026_98432_resolved_mode: observe
+    cve_2026_98432_allow_mode_downgrade: true
+  when: >-
+    cve_2026_98432_mode == 'auto'
+    and cve_2026_98432_node is not failed
+    and cve_2026_98432_node.resources | default([]) | length > 0
+    and cve_2026_98432_node.resources[0].metadata.labels
+        [cve_2026_98432_mode_label] | default('') == 'observe'
+
+- name: Set mode=observe (the label is absent — the fleet default)
+  # Stage 1 installs the rule with no labeling at all: absent =
+  # observe. The downgrade is sanctioned (a node that was enforcing
+  # and lost its label returns to the fleet default) — and this
+  # guarantees resolved_mode is ALWAYS defined in auto mode (the
+  # guard reads it; an undefined var would fail the whole run).
+  ansible.builtin.set_fact:
+    cve_2026_98432_resolved_mode: observe
+    cve_2026_98432_allow_mode_downgrade: true
+  when: >-
+    cve_2026_98432_mode == 'auto'
+    and cve_2026_98432_node is not failed
+    and cve_2026_98432_node.resources | default([]) | length > 0
+    and cve_2026_98432_node.resources[0].metadata.labels
+        [cve_2026_98432_mode_label] | default('') == ''
+
+- name: Persist the resolved mode (the API-outage fallback state)
+  # Written on every successful label resolution; the host filesystem
+  # survives pod restarts. The guard/load tasks run AFTER this, so the
+  # persisted mode always matches the table the run leaves behind.
+  ansible.builtin.copy:
+    content: "{{ cve_2026_98432_resolved_mode }}"
+    dest: "{{ cve_2026_98432_mode_state_path }}"
+    owner: root
+    group: root
+    mode: "0644"
+  when: cve_2026_98432_mode == 'auto'
+
+- name: Resolve the effective mode (explicit modes pass through)
+  # auto resolved above; observe/enforce are their own resolution.
+  ansible.builtin.set_fact:
+    cve_2026_98432_resolved_mode: "{{ cve_2026_98432_mode }}"
+  when: cve_2026_98432_mode != 'auto'
+
+- name: Fail on an unknown mode label
+  # Typo protection: mode=eforce must FAIL, not silently resolve
+  # observe. An ABSENT label is observe (the fleet default — Stage 1
+  # installs the rule with no labeling at all).
+  ansible.builtin.fail:
+    msg: >-
+      cve_2026_98432: node {{ cve_2026_98432_node_name }} carries
+      cve_2026_98432_mode_label='{{ cve_2026_98432_node.resources[0].metadata.labels
+      [cve_2026_98432_mode_label] | default("") }}' (must be
+      'enforce' or 'observe'; absent = observe). Fix the label.
+  when: >-
+    cve_2026_98432_mode == 'auto'
+    and cve_2026_98432_node.resources[0].metadata.labels
+        [cve_2026_98432_mode_label] | default('') not in ['', 'enforce', 'observe']
+
+# Unsupported families skip with a warning (or fail, per the default).
+# Pod-native delivery has no OS-family dependency at all (the image
+# provides nft; the kernel takes the rule) — the gate only applies to
+# host-tooling delivery.
+- name: Refuse to run on unsupported OS families
+  when: >-
+    not (cve_2026_98432_pod_native | bool)
+    and ansible_facts['os_family'] not in ['Debian', 'RedHat']
+  block:
+    - name: Report unsupported OS family
+      ansible.builtin.debug:
+        msg: "cve_2026_98432: unsupported OS family {{ ansible_facts['os_family'] }}, skipping"
+
+    - name: Fail on unsupported family when configured
+      ansible.builtin.fail:
+        msg: "cve_2026_98432: unsupported OS family {{ ansible_facts['os_family'] }}"
+      when: cve_2026_98432_fail_on_unsupported_family | bool
+
+    - name: Skip the rest of the role on this host
+      ansible.builtin.meta: end_host
+
+# Pod-native: the image's nft is the tool (netlink against the shared
+# host netns) — package installs are a host-tooling concern only.
+- name: Check whether nft is already available
+  ansible.builtin.command: sh -c 'command -v nft >/dev/null 2>&1 && echo yes || echo no'
+  register: cve_2026_98432_nft_present
+  changed_when: false
+  failed_when: false
+
+- name: Install nftables (Debian family)
+  ansible.builtin.apt:
+    name: nftables
+    state: present
+  when: >-
+    not (cve_2026_98432_pod_native | bool)
+    and cve_2026_98432_nft_present.stdout != 'yes'
+    and ansible_facts['os_family'] == 'Debian'
+
+- name: Install nftables (RedHat family)
+  ansible.builtin.dnf:
+    name: nftables
+    state: present
+  when: >-
+    not (cve_2026_98432_pod_native | bool)
+    and cve_2026_98432_nft_present.stdout != 'yes'
+    and ansible_facts['os_family'] == 'RedHat'
+
+- name: Fail when no nft is available anywhere
+  ansible.builtin.fail:
+    msg: >-
+      cve_2026_98432: no nft binary available (not on PATH, and package
+      install is not applicable here). Pod-native runs must use an image
+      built with nftables (see images/ansible/Dockerfile).
+  when: cve_2026_98432_nft_present.stdout != 'yes'
+
+# Mode guard FIRST — before any task that could touch the ruleset file
+# or the table. The guard-skip fact gates the renders too: an observe
+# release's scheduled re-run on a canary node (an enforce release owns
+# it) must NOT re-render the host-side ruleset file to observe — the
+# reconciler follows that file as its mode source and would reload
+# every pod netns to observe within one sweep, silently undoing the
+# enforce release's netns rules.
+- name: Check that the table is loaded
+  ansible.builtin.command: nft list table ip {{ cve_2026_98432_table }}
+  register: cve_2026_98432_table_check
+  changed_when: false
+  failed_when: false
+
+- name: Read the loaded verdict
+  ansible.builtin.command: nft list chain ip {{ cve_2026_98432_table }} input
+  register: cve_2026_98432_loaded_chain
+  changed_when: false
+  failed_when: false
+
+- name: Compute the guard-skip fact
+  # Single source of truth for "another release owns this node with an
+  # enforce table; this observe run must not touch it" — every
+  # downstream task (render, load, verify, probe) keys off this ONE
+  # fact instead of a copy-pasted condition that a new task could
+  # forget.
+  ansible.builtin.set_fact:
+    cve_2026_98432_guard_skip: >-
+      {{ (cve_2026_98432_table_check.rc == 0
+          and 'drop' in cve_2026_98432_loaded_chain.stdout
+          and cve_2026_98432_resolved_mode == 'observe'
+          and not (cve_2026_98432_allow_mode_downgrade | bool)) | bool }}
+
+- name: Create the nftables config directory
+  ansible.builtin.file:
+    path: "{{ cve_2026_98432_ruleset_path | dirname }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Create the host-side nftables directory (pod-native)
+  # The reconciler sidecar reads the ruleset through the /host mount —
+  # containers do not share filesystems, so the mitigator's own /etc
+  # copy is invisible to it.
+  ansible.builtin.file:
+    path: "{{ cve_2026_98432_ruleset_host_path | dirname }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  when: cve_2026_98432_pod_native | bool
+
+- name: Install the CVE-2026-98432 ruleset
+  ansible.builtin.template:
+    src: cve-2026-98432.nft.j2
+    dest: "{{ cve_2026_98432_ruleset_path }}"
+    owner: root
+    group: root
+    mode: "0644"
+  register: cve_2026_98432_rules
+  when: not cve_2026_98432_guard_skip
+
+- name: Install the ruleset host-side (pod-native)
+  # Same bytes, second copy: the reconciler sidecar (and any other
+  # container) reads it via /host.
+  ansible.builtin.template:
+    src: cve-2026-98432.nft.j2
+    dest: "{{ cve_2026_98432_ruleset_host_path }}"
+    owner: root
+    group: root
+    mode: "0644"
+  when: >-
+    cve_2026_98432_pod_native | bool
+    and not cve_2026_98432_guard_skip
+
+# Persistence auto-detect (design spec §8): a writable host /etc AND a
+# usable systemd get the boot unit for instant post-reboot coverage;
+# anything else (read-only /etc, no systemd — COS pods run alpine with
+# no systemctl) degrades to the chart's scheduled re-run interval —
+# the honest persistence on hosts that are replaced rather than
+# rebooted. Pod-native probes the HOST through the /host mount;
+# chroot/SSH targets probe their own /etc (the chroot root IS the host
+# root — /host does not exist there).
+- name: Detect writable host /etc for boot persistence
+  ansible.builtin.command: >-
+    sh -c 'test -w {{ "/host/etc/nftables" if cve_2026_98432_pod_native | bool else "/etc/nftables" }} 2>/dev/null && echo yes || echo no'
+  register: cve_2026_98432_host_etc_writable
+  changed_when: false
+  failed_when: false
+
+- name: Detect a usable systemd for boot persistence
+  # The systemd module needs systemctl on the CONTROLLER's PATH —
+  # a host binary at /host/usr/bin/systemctl is NOT invocable from the
+  # pod (alpine image ships no systemctl). Pod-native therefore
+  # requires systemctl on the pod's own PATH; the SSH/chroot path runs
+  # on the host where PATH systemctl is the host's. A writable /etc
+  # alone is NOT enough — COS would install a unit nothing runs.
+  # `is-system-running` exits NON-ZERO for `degraded` (a normal state
+  # on long-lived nodes — some unrelated unit failed) — any ANSWER
+  # (running/degraded) proves systemd operational; only offline (rc 1
+  # with no output / rc != 0 AND no state printed) means unusable.
+  ansible.builtin.command: >-
+    sh -c 'command -v systemctl >/dev/null 2>&1 || exit 1;
+    state=$(systemctl is-system-running 2>/dev/null);
+    [ "$state" = running ] || [ "$state" = degraded ]'
+  register: cve_2026_98432_systemd_usable
+  changed_when: false
+  failed_when: false
+
+- name: Create the host systemd units directory (pod-native)
+  ansible.builtin.file:
+    path: /host/etc/systemd/system
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  when: cve_2026_98432_pod_native | bool
+
+- name: Install the boot unit
+  ansible.builtin.copy:
+    src: cve-2026-98432.service
+    dest: "{{ '/host' if cve_2026_98432_pod_native | bool else '' }}/etc/systemd/system/{{ cve_2026_98432_unit }}"
+    owner: root
+    group: root
+    mode: "0644"
+  register: cve_2026_98432_unit_file
+  when: cve_2026_98432_host_etc_writable.stdout == 'yes' and cve_2026_98432_systemd_usable.rc == 0
+
+- name: Report interval-only persistence
+  ansible.builtin.debug:
+    msg: >-
+      cve_2026_98432: host /etc not writable (or absent) — boot unit
+      skipped; persistence is the chart's scheduled re-run interval.
+      The rule is live NOW; a node reboot is covered on the next
+      scheduled run (or the DaemonSet rescheduling the pod).
+  when: cve_2026_98432_host_etc_writable.stdout != 'yes' or cve_2026_98432_systemd_usable.rc != 0
+
+# A run with an unchanged file still reloads the table when someone
+# deleted it out-of-band: the check below fails, and the load runs.
+# (The table check + verdict read + guard-skip fact ran BEFORE the
+# renders — see the guard block near the top of this file.)
+
+- name: Refuse a silent enforce→observe downgrade
+  ansible.builtin.fail:
+    msg: >-
+      cve_2026_98432 mode guard: an ENFORCE table (counter drop) is
+      loaded on {{ inventory_hostname }} but this run requests mode=observe.
+      Refusing to silently downgrade — that would re-expose CVE-2026-98432.
+      To roll back deliberately, re-run with
+      cve_2026_98432_allow_mode_downgrade=true (see the rollout runbook, R1).
+  when: >-
+    cve_2026_98432_table_check.rc == 0
+    and 'drop' in cve_2026_98432_loaded_chain.stdout
+    and cve_2026_98432_resolved_mode == 'observe'
+    and not (cve_2026_98432_allow_mode_downgrade | bool)
+    and not (cve_2026_98432_pod_native | bool)
+
+# Fail CLOSED: the table exists but its verdict could not be read
+# (transient nft error). Loading observe over an unreadable table could
+# silently downgrade a live enforce rule — refuse until the verdict is
+# readable.
+- name: Refuse to proceed on an unreadable verdict
+  ansible.builtin.fail:
+    msg: >-
+      cve_2026_98432 mode guard: the table exists on
+      {{ inventory_hostname }} but its verdict could not be read
+      (nft list chain failed). Refusing to load {{ cve_2026_98432_resolved_mode }}
+      over an unreadable table — re-run once nft responds.
+  when: >-
+    cve_2026_98432_table_check.rc == 0
+    and cve_2026_98432_loaded_chain.rc != 0
+    and cve_2026_98432_resolved_mode == 'observe'
+
+# Two-release coexistence (the progressive rollout's canary pattern):
+# on the POD-NATIVE path an observe release's scheduled re-run finding
+# an enforce table (the enforce release owns that node) must SKIP with
+# a loud log — a fail would CrashLoop the observe pod on every canary
+# node for the whole transition. The enforce table stays (the guard's
+# purpose); the SSH path keeps the hard fail (an operator ran it
+# deliberately and must see the refusal). The guard-skip fact was
+# computed BEFORE the renders (top of this file).
+
+- name: Skip the load — an enforce release owns this node (pod-native)
+  ansible.builtin.debug:
+    msg: >-
+      cve_2026_98432 mode guard: enforce table loaded on
+      {{ inventory_hostname }}, this run requests observe — SKIPPING the
+      load (an enforce release owns this node; refusing to downgrade).
+      The enforce table is untouched.
+  when: >-
+    cve_2026_98432_guard_skip
+    and (cve_2026_98432_pod_native | bool)
+
+- name: Report an operator-requested downgrade
+  ansible.builtin.debug:
+    msg: >-
+      cve_2026_98432: allow_mode_downgrade=true — replacing the enforce
+      table with observe on {{ inventory_hostname }} (operator-requested
+      rollback; the node counts instead of drops from now on).
+  when: >-
+    cve_2026_98432_table_check.rc == 0
+    and 'drop' in cve_2026_98432_loaded_chain.stdout
+    and cve_2026_98432_resolved_mode == 'observe'
+    and (cve_2026_98432_allow_mode_downgrade | bool)
+
+- name: Load the ruleset now and at boot
+  ansible.builtin.systemd:
+    name: "{{ cve_2026_98432_unit }}"
+    enabled: true
+    # restarted on any change so a new rule file takes effect now;
+    # started otherwise. A MODE FLIP must also restart: the unit is a
+    # oneshot with RemainAfterExit — `started` on an already-active
+    # unit is a no-op, so an observe→enforce (or sanctioned downgrade)
+    # whose unit file is unchanged would otherwise never reload the
+    # table. The loaded-verdict check (from the guard) detects the flip.
+    state: >-
+      {{ 'restarted'
+         if cve_2026_98432_rules is changed
+            or cve_2026_98432_unit_file is changed
+            or cve_2026_98432_unit_file is skipped
+            or (cve_2026_98432_table_check.rc == 0
+                and ((cve_2026_98432_resolved_mode == 'observe'
+                       and 'drop' in cve_2026_98432_loaded_chain.stdout)
+                      or (cve_2026_98432_resolved_mode == 'enforce'
+                          and 'log prefix' in cve_2026_98432_loaded_chain.stdout)))
+         else 'started' }}
+    daemon_reload: true
+  # Under --check the unit file is never copied, so systemd cannot find
+  # the unit; tolerate that only in check mode.
+  ignore_errors: "{{ ansible_check_mode }}"
+  when: >-
+    cve_2026_98432_host_etc_writable.stdout == 'yes'
+    and cve_2026_98432_systemd_usable.rc == 0
+    and not cve_2026_98432_guard_skip
+
+- name: Load the ruleset directly (no systemd persistence)
+  # Pod-native on hosts without a writable /etc (or without systemd):
+  # the table load is netlink — nft -f from the pod's own ruleset copy.
+  ansible.builtin.command: nft -f {{ cve_2026_98432_ruleset_path }}
+  register: cve_2026_98432_direct_load
+  # Idempotent: only a change when the table was missing, the ruleset
+  # changed, or the loaded verdict differs from the requested mode
+  # (mode flip) — a same-mode re-run on an already-loaded table is
+  # zero-change.
+  changed_when: >-
+    cve_2026_98432_table_check.rc != 0
+    or cve_2026_98432_rules is changed
+    or (cve_2026_98432_table_check.rc == 0
+        and ((cve_2026_98432_resolved_mode == 'observe'
+               and 'drop' in cve_2026_98432_loaded_chain.stdout)
+              or (cve_2026_98432_resolved_mode == 'enforce'
+                  and 'log prefix' in cve_2026_98432_loaded_chain.stdout)))
+  ignore_errors: "{{ ansible_check_mode }}"
+  when: >-
+    (cve_2026_98432_host_etc_writable.stdout != 'yes'
+     or cve_2026_98432_systemd_usable.rc != 0)
+    and not cve_2026_98432_guard_skip
+
+- name: Reload the ruleset when the table was missing
+  ansible.builtin.command: nft -f {{ cve_2026_98432_ruleset_path }}
+  when: >-
+    cve_2026_98432_table_check.rc != 0
+    and cve_2026_98432_host_etc_writable.stdout == 'yes'
+    and cve_2026_98432_systemd_usable.rc == 0
+  changed_when: true
+  ignore_errors: "{{ ansible_check_mode }}"
+
+- name: Verify the rule is loaded and counted
+  ansible.builtin.command: nft list chain ip {{ cve_2026_98432_table }} input
+  register: cve_2026_98432_chain
+  changed_when: false
+  # Mode-aware: enforce must show the drop verdict; observe must show the
+  # log verdict and must NOT drop. nft list renders protocol names
+  # numerically (ip protocol 6), interleaves counter bytes between the
+  # match and the verdict, and the log prefix carries a trailing space
+  # inside the quotes — the regexes key on the verdict tokens only.
+  # Skipped when the guard skipped the load (an enforce release owns the
+  # node — the enforce table is the correct state, not this run's mode).
+  failed_when: >-
+    not cve_2026_98432_guard_skip
+    and ((cve_2026_98432_resolved_mode == 'enforce' and cve_2026_98432_chain.stdout is not search('hdrlength != 5 counter packets \d+ bytes \d+ drop'))
+         or (cve_2026_98432_resolved_mode == 'observe'
+             and (cve_2026_98432_chain.stdout is not search('log prefix .cve-2026-98432-observe.')
+                  or cve_2026_98432_chain.stdout is search('drop'))))
+  ignore_errors: "{{ ansible_check_mode }}"
+
+- name: Run the live drop probe
+  ansible.builtin.import_tasks: probe.yml
+  when: >-
+    cve_2026_98432_run_probe | bool
+    and not cve_2026_98432_guard_skip
+
+- name: Publish node_exporter metrics
+  ansible.builtin.import_tasks: metrics.yml
+  when: cve_2026_98432_metrics | bool

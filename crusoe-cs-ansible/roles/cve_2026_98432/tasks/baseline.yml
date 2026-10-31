@@ -1,0 +1,28 @@
+---
+# Baseline probe: BEFORE the rule loads, an options SYN must CONNECT.
+# If it times out here, the kernel (or an existing firewall) already
+# drops option-bearing packets and the post-rule probe would pass
+# vacuously — the run reports that instead of claiming the mitigation
+# worked. Runs with gather_facts: false via raw python3 — no facts, no
+# become, mirroring the pre-flight play's constraints.
+- name: Baseline — SYN with IP options must connect before the rule
+  ansible.builtin.raw: >-
+    python3 -c 'import socket, sys;
+    NOP = b"\x01\x01\x01\x01";
+    srv = socket.create_server(("127.0.0.1", 0));
+    c = socket.socket();
+    c.setsockopt(socket.IPPROTO_IP, socket.IP_OPTIONS, NOP);
+    c.settimeout(2);
+    sys.exit(0) if c.connect(srv.getsockname()) is None else sys.exit(1)'
+  register: cve_2026_98432_baseline
+  changed_when: false
+  failed_when: false
+
+- name: Report a vacuous baseline
+  ansible.builtin.debug:
+    msg: >-
+      cve_2026_98432: options SYN already dropped on {{ inventory_hostname }}
+      before the rule loaded (rc={{ cve_2026_98432_baseline.rc }}).
+      The post-rule probe cannot prove the mitigation; investigate what
+      already drops option-bearing packets on this host.
+  when: cve_2026_98432_baseline.rc != 0

@@ -1,0 +1,173 @@
+# -- Container image: the derived ansible image (the repo's ONE image —
+#    controller AND DaemonSet payload; roles + wrappers + inventory +
+#    callback plugins + the generic mitigate.py entrypoint baked at
+#    /opt/ansible).
+#
+#    ⚠️ PIN BY DIGEST — never a floating tag: a fleet install must run
+#    exactly the bytes that were reviewed.
+#
+#    Resolution order (first match wins):
+#      1. --set image.full=<ref>          (explicit escape hatch)
+#      2. the values below (all three required)
+#    The assembled ref MUST be digest-pinned (@sha256:...); the chart
+#    fails loudly if nothing resolves.
+#
+#    ⚠️ The default digest predates the cve_2026_98432 role and the
+#    generic entrypoint — rebuild the image and re-pin from the
+#    ansible-image:build job output before installing with the
+#    cve-2026-98432 mitigation enabled.
+image:
+  # Explicit full image reference (overrides registry/repository/digest).
+  full: ""
+  registry: ghcr.io/crusoecloud
+  repository: crusoe-cs/ansible
+  digest: sha256:0494d3684643749c847b80aa40d4a2cf46a48142ee28a6903b20da06ea572dae
+  # IfNotPresent is the REGISTRY-path default (the default image IS
+  # a registry ref — a Never default with a registry image is the
+  # ErrImageNeverPull/ImagePullBackOff trap, found live on both
+  # clusters). SIDELOAD workflows (e2e, air-gapped) set Never: the
+  # image is loaded into the node's containerd and a pull must fail
+  # rather than reach a registry.
+  pullPolicy: IfNotPresent
+
+# -- Mitigations to run on every node. Each entry:
+#      name:     short identifier (logs, journal, failure reporting)
+#      enabled:  false skips the entry entirely
+#      playbook: wrapper playbook baked at /opt/ansible in the image
+#      vars:     flat map passed to the playbook as -e key=value
+#      interval: 0 (default) = ONCE per pod start — re-runs happen when
+#                the pod restarts (node reboot, pod deletion, chart
+#                upgrade). > 0 = SCHEDULED: re-run every interval
+#                seconds for the pod's lifetime, for mitigations that
+#                must hold continuously or can be undone mid-life (a
+#                package upgrade reinstalls a vulnerable file, another
+#                tool flushes the nft ruleset). Scheduled roles MUST be
+#                idempotent — a compliant host's re-run is zero-change.
+#      sidecar:  optional — a second container this mitigation needs
+#                (image from the same digest-pinned ref; command from
+#                the image). Fields: command, interval (env
+#                POD_NETNS_INTERVAL), comment. The mitigation owns its
+#                sidecar; disabling the mitigation removes it.
+#
+#    The pod runs EVERY enabled mitigation (one failure does not block
+#    the others), parks when all once-only mitigations succeed and
+#    nothing is scheduled, and CrashLoops naming the failures otherwise.
+mitigations:
+  - name: cve-2026-98432
+    enabled: true
+    # Pod-native delivery (default): the image's own nft via netlink
+    # against the shared host netns — no chroot, no host userspace.
+    playbook: wrapper-cve-2026-98432-pod.yml
+    # -- Mode: label-driven (the role's default). The node's
+    #    cve-2026-98432.remediator.crusoe.ai/mode label IS the rollout
+    #    state — absent = observe (the sane default; nothing drops
+    #    without an explicit operator action), mode=enforce = enforce
+    #    (the deliberate action), mode=observe = the sanctioned R1
+    #    downgrade. To PIN the mode instead (air-gapped clusters, the
+    #    SSH path, a freeze hold), set the role's mode var in `vars`
+    #    below — and NEVER via `--set mitigations[0].vars...`: Helm
+    #    REPLACES list elements wholesale, dropping
+    #    name/playbook/enabled and silently disabling the mitigation.
+    # Metrics: the role's metrics.sh writes cve_2026_98432.prom into
+    # the chart hostPath; the metrics-server sidecar serves it on
+    # :19698 (see metricsPort / metricsBackend above).
+    metrics: true
+    # Scheduled: the nft table can be flushed out-of-band (another
+    # tool's `nft flush ruleset`), and the role's table check
+    # self-heals it — verified: delete → re-run → restored, changed=1.
+    interval: 3600
+    vars:
+      cve_2026_98432_run_probe: "true"
+      cve_2026_98432_metrics: "true"
+      cve_2026_98432_fail_on_unsupported_family: "true"
+    # Pod-netns reconciler sidecar: installs the drop rule inside every
+    # pod network namespace — event-driven (inotify on /run/netns;
+    # Cilium mounts every pod netns there) with an interval fallback
+    # sweep. Cilium's veth/tc BPF delivers pod-bound traffic into the
+    # pod netns WITHOUT traversing the host's nft hooks (verified
+    # empirically on Cilium v1.19.1), so the host rule alone leaves pod
+    # sockets exposed. Harmless on bridge-mode CNIs; no-op on
+    # containerless hosts.
+    sidecar:
+      command: /usr/local/sbin/cve-2026-98432-netns-reconcile.py
+      # Sweep interval (seconds). inotify covers netns that Cilium
+      # mounts in /run/netns instantly, but NOT every pod netns gets a
+      # mount (verified live) — the interval sweep is the primary
+      # catcher for those, so keep it short: it is the worst-case
+      # exposure window for a new pod. The sweep is cheap (one stat
+      # per /proc entry plus an nft list per uncovered netns).
+      interval: 10
+  - name: emudhra-ca
+    enabled: false
+    playbook: wrapper.yml
+    # Scheduled: a ca-certificates package upgrade can reinstall a
+    # distrusted root; the role's fingerprint detection re-excises it.
+    interval: 86400
+    vars:
+      emudhra_ca_run_connectivity_check: "false"
+      emudhra_ca_fail_on_unsupported_family: "true"
+      emudhra_ca_extended_stores: "true"
+
+# -- Metrics: any enabled mitigation with metrics: true (default)
+#    renders the generic metrics-server sidecar — a tiny HTTP server
+#    (serve-metrics.py, baked into the image) that serves every *.prom
+#    in the chart metricsDir hostPath on the metricsPort. The pod
+#    carries prometheus.io/scrape annotations, so the cluster's
+#    existing scrape path picks it up with zero config changes
+#    (vmagent's kubernetes-pods job on Crusoe; managed collection via
+#    the PodMonitoring CR on GKE — see metricsBackend).
+metricsPort: 19698
+
+# -- HostPath directory the metrics generators write into and the
+#    sidecar serves. Must match the role's
+#    cve_2026_98432_metrics_host_dir (the role creates it; metrics.sh
+#    and the reconciler write here via their env defaults).
+metricsDir: /var/lib/crusoe-mitigator
+
+# -- Metrics egress adapter: "vmagent" (default — pod annotations,
+#    Crusoe k8s) or "gmp" (renders a PodMonitoring CR for Google
+#    Managed Service for Prometheus managed collection, scraping the
+#    same :19698 exposition).
+metricsBackend: vmagent
+
+# -- Liveness probes (default on). The reconciler's probe enforces the
+#    heartbeat contract (alive-file age < 5x sweep interval); the
+#    metrics-server probes GET /metrics (the exact path vmagent/GMP
+#    scrapes — a passing probe proves the evidence path); the
+#    mitigator's probe checks the entrypoint process (the playbook's
+#    own success/failure is the CrashLoop's job).
+probes:
+  enabled: true
+  reconcilerAliveMaxAge: 50   # seconds; 5x the 10s sweep
+  metricsTimeoutSeconds: 3
+
+# -- Pod termination grace period (seconds). On deletion kubelet sends
+#    SIGTERM; the mitigator entrypoint drains (the in-flight playbook
+#    finishes, no new run starts) and exits 0. Keep this comfortably
+#    above a playbook run's duration; after it kubelet SIGKILLs and
+#    the idempotent re-run on restart repairs any half-finished state.
+terminationGracePeriodSeconds: 10
+
+# -- Scheduled mitigations CrashLoop after this many consecutive
+#    failures (a transient failure rides to the next scheduled run;
+#    once-only failures CrashLoop immediately — the backoff is the
+#    retry cadence).
+mitigationMaxConsecutiveFailures: 3
+
+# -- Write structured events (start, per-mitigation result, recap) to
+#    the node's systemd journal via the journald_syslog callback plugin.
+#    The Crusoe Watch Agent (Vector) forwards journald entries to the
+#    Crusoe Managed Logs console — filter by SYSLOG_IDENTIFIER=
+#    crusoe-mitigator there. On hosts without the socket the callback
+#    disables itself silently and kubectl logs remains the primary
+#    channel.
+journaldLogging: true
+
+# Restrict to specific nodes (e.g. the k8s nodepool).
+# Leave empty to run on all nodes.
+nodeSelector: {}
+#  node-role.kubernetes.io/worker: ""
+
+tolerations: []
+
+imagePullSecrets: []

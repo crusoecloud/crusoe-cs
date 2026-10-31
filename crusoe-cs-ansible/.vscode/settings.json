@@ -15,5 +15,10 @@
       "envManager": "ms-python.python:pipenv",
       "packageManager": "ms-python.python:pip"
     }
-  ]
+  ],
+  "python.analysis.lineLength": 88,
+  "python.analysis.diagnosticSeverityOverrides": {
+    "pycodestyle.line-too-long": "none"
+  },
+  "flake8.args": ["--max-line-length=88", "--extend-ignore=E501"]
 }

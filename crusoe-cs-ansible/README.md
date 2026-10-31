@@ -13,6 +13,7 @@ once, pick a host group, run a playbook.
 | Playbook | What it does | Docs |
 |---|---|---|
 | [eMudhra CA distrust](#emudhra-ca-distrust) | Removes root CAs chained to the compromised eMudhra intermediates | [README](playbooks/emudhra-ca/README.md) |
+| [CVE-2026-98432 mitigation](#cve-2026-98432-mitigation) | Drops IPv4 TCP packets with IP options (kernel UAF mitigation) | [README](playbooks/cve-2026-98432/README.md) |
 | [NFS](#nfs) | Mounts, troubleshoots, and validates Crusoe shared disks | [README](playbooks/nfs/README.md) |
 | [Log collection](#log-collection) | Collects node logs for troubleshooting | [Playbook](playbooks/logs_collector.yml) |
 | [SSH key management](#ssh-key-management) | Adds or removes SSH authorized keys | [Playbook](playbooks/ssh_keys.yml) |
@@ -22,6 +23,15 @@ once, pick a host group, run a playbook.
 Removes the distrusted eMudhra root CAs from hosts' trust stores.
 
 📖 [`playbooks/emudhra-ca/README.md`](playbooks/emudhra-ca/README.md)
+
+### CVE-2026-98432 mitigation
+
+Drops IPv4 TCP packets that carry IP options on target hosts, mitigating
+the kernel use-after-free in `ip_options_build()` (CVE-2026-98432). Two
+delivery paths share one role: an SSH playbook for any VM, and a
+DaemonSet chart for Kubernetes node host VMs (no SSH).
+
+📖 [`playbooks/cve-2026-98432/README.md`](playbooks/cve-2026-98432/README.md)
 
 ### NFS
 
@@ -38,6 +48,14 @@ privileged DaemonSet + chroot — fleet-wide remediation from a single
 `helm install`, no SSH.
 
 📖 [`charts/crusoe-distrust-emudhra-ca/README.md`](charts/crusoe-distrust-emudhra-ca/README.md)
+
+### CVE-2026-98432 DaemonSet chart
+
+Runs the `cve_2026_98432` role against every Kubernetes node's host VM
+via the generic `crusoe-mitigator` chart (configurable mitigation
+list: cve-2026-98432, emudhra-ca, ...).
+
+📖 [`charts/crusoe-mitigator/README.md`](charts/crusoe-mitigator/README.md)
 
 ### Log collection
 
