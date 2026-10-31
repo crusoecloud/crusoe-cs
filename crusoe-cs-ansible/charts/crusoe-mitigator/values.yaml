@@ -12,16 +12,17 @@
 #    The assembled ref MUST be digest-pinned (@sha256:...); the chart
 #    fails loudly if nothing resolves.
 #
-#    ⚠️ The default digest predates the cve_2026_98432 role and the
-#    generic entrypoint — rebuild the image and re-pin from the
-#    ansible-image:build job output before installing with the
-#    cve-2026-98432 mitigation enabled.
+#    The default digest is the merged progressive-rollout build
+#    (mode-aware role, label-driven modes, event-driven flips, JSON
+#    metrics, API-outage fallback, reconciler mode-follow) — published
+#    to GHCR by the main pipeline. Re-pin on each release: the
+#    ansible-image:build job output prints the digest to pin here.
 image:
   # Explicit full image reference (overrides registry/repository/digest).
   full: ""
   registry: ghcr.io/crusoecloud
   repository: crusoe-cs/ansible
-  digest: sha256:0494d3684643749c847b80aa40d4a2cf46a48142ee28a6903b20da06ea572dae
+  digest: sha256:0276c70844cbe0532266f34174e49f70439204178d2799dec102bd04b7eeffb8
   # IfNotPresent is the REGISTRY-path default (the default image IS
   # a registry ref — a Never default with a registry image is the
   # ErrImageNeverPull/ImagePullBackOff trap, found live on both
