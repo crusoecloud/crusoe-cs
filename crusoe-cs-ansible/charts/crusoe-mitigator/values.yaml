@@ -12,17 +12,17 @@
 #    The assembled ref MUST be digest-pinned (@sha256:...); the chart
 #    fails loudly if nothing resolves.
 #
-#    The default digest is the merged progressive-rollout build
-#    (mode-aware role, label-driven modes, event-driven flips, JSON
-#    metrics, API-outage fallback, reconciler mode-follow) — published
-#    to GHCR by the main pipeline. Re-pin on each release: the
-#    ansible-image:build job output prints the digest to pin here.
+#    The default digest is the 261f97c build (progressive rollout +
+#    hostNetwork, boot-unit ordering-cycle fix, reconciler reload-storm
+#    fix, --verify, API-outage fallback fix) — published to GHCR by the
+#    main pipeline. Re-pin on each release: the ansible-image:build
+#    job output prints the digest to pin here.
 image:
   # Explicit full image reference (overrides registry/repository/digest).
   full: ""
   registry: ghcr.io/crusoecloud
   repository: crusoe-cs/ansible
-  digest: sha256:0276c70844cbe0532266f34174e49f70439204178d2799dec102bd04b7eeffb8
+  digest: sha256:29c084b7c9b90f02a5ecd07eb575db205fa2c63a5e391e2a0f419712a1ce93c5
   # IfNotPresent is the REGISTRY-path default (the default image IS
   # a registry ref — a Never default with a registry image is the
   # ErrImageNeverPull/ImagePullBackOff trap, found live on both
