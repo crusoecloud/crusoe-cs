@@ -11,7 +11,7 @@ derive" the source of truth?
 |-------|------------|--------|
 | Distro/package records (Ubuntu, Debian, Rocky/Fedora) | `corpus-distro-records.md` | Covered |
 | Public CA-ecosystem records (root programs, CCADB, advisory) | The advisory site itself, fetched directly by the composer (`emudhra.we-have-a-problem.com`) | Covered — the dedicated researcher dispatch failed (network error), but the advisory site is the primary coordination artifact this facet would have summarized (root-program action dates, Mozilla bug 2083449, dev-security-policy thread, machine-readable artifacts). No re-dispatch needed. |
-| Crusoe-internal advisory (Jira/Confluence) | Not searched | Skipped by user answer — the user supplied the advisory site directly as the source of truth, superseding an internal-bulletin search. |
+| Internal advisory channels | Not searched | Skipped by user answer — the user supplied the advisory site directly as the source of truth, superseding an internal-bulletin search. |
 
 ## Combined Answer
 

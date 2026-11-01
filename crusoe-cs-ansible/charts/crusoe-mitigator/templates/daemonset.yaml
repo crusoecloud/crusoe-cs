@@ -38,6 +38,17 @@ spec:
     # The role reads the node's mode label via the k8s API (the
     # label IS the rollout state); the watcher makes flips event-driven.
     spec:
+      # LOAD-BEARING: pod-native delivery loads the table with
+      # `nft -f` in the pod's own netns, and the reconciler reads the
+      # "host" table the same way (no nsenter) — both only touch the
+      # HOST's netns when the pod is hostNetwork. Without it the rule
+      # loads in the pod's isolated netns and every check (probe,
+      # metrics, reconciler) reads it there: the node looks protected
+      # while kubelet/sshd/hostNetwork pods stay exposed.
+      hostNetwork: true
+      # Standard companion (the sibling chart's reviewed pattern):
+      # keep cluster DNS resolvable in a hostNetwork pod.
+      dnsPolicy: ClusterFirstWithHostNet
       serviceAccountName: {{ .Release.Name }}
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:

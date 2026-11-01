@@ -340,6 +340,13 @@
   when: cve_2026_98432_pod_native | bool
 
 - name: Install the boot unit
+  # A plain file copy to the host's /etc — NO systemctl needed (the
+  # HOST's systemd runs the unit at boot). Gating on systemd_usable
+  # conflated "can install" with "can drive": the alpine chart image
+  # ships no systemctl, so the pod skipped the install on writable-/etc
+  # Ubuntu nodes — no boot persistence unless an SSH-era run had left
+  # a unit behind. The LOAD task below keeps the systemd_usable gate
+  # (starting the unit now genuinely needs systemctl on the pod PATH).
   ansible.builtin.copy:
     src: cve-2026-98432.service
     dest: "{{ '/host' if cve_2026_98432_pod_native | bool else '' }}/etc/systemd/system/{{ cve_2026_98432_unit }}"
@@ -347,7 +354,7 @@
     group: root
     mode: "0644"
   register: cve_2026_98432_unit_file
-  when: cve_2026_98432_host_etc_writable.stdout == 'yes' and cve_2026_98432_systemd_usable.rc == 0
+  when: cve_2026_98432_host_etc_writable.stdout == 'yes'
 
 - name: Report interval-only persistence
   ansible.builtin.debug:

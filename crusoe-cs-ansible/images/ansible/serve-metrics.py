@@ -111,7 +111,7 @@ def make_handler(metrics_dir):
             return json.dumps(out)
 
         def exposition(self, directory):
-            seen_meta = set()
+            seen_meta = {}
             samples = []
             try:
                 names = sorted(os.listdir(directory))
@@ -145,14 +145,25 @@ def make_handler(metrics_dir):
                             continue
                         meta_key = (parts[1], parts[2])
                         if meta_key in seen_meta:
-                            print(
-                                f"serve-metrics: duplicate {parts[1]} "
-                                f"for family {parts[2]} (from {name}); "
-                                "keeping first-seen",
-                                file=sys.stderr,
-                            )
+                            # IDENTICAL re-declaration (same kind, family,
+                            # AND payload) is the normal multi-generator
+                            # shape — e.g. the metrics script and the
+                            # reconciler both declare matched_packets_total.
+                            # The kubelet probes GET /metrics every 10s, so
+                            # warning here was ~11.5k lines/day/pod of noise
+                            # (found live). Dedupe silently; only a CONFLICT
+                            # (a different type/doc for one family — a
+                            # generator bug) warns, which is the case
+                            # first-seen-wins exists to protect.
+                            if seen_meta[meta_key] != line:
+                                print(
+                                    f"serve-metrics: duplicate {parts[1]} "
+                                    f"for family {parts[2]} (from {name}); "
+                                    "keeping first-seen",
+                                    file=sys.stderr,
+                                )
                             continue
-                        seen_meta.add(meta_key)
+                        seen_meta[meta_key] = line
                         samples.append(line)
                     elif line.strip():
                         samples.append(line)

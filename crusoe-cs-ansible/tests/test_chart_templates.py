@@ -58,6 +58,22 @@ def test_default_render_has_sidecar_and_annotations():
     assert "serve-metrics.py" in out
 
 
+def test_pod_spec_requires_hostnetwork():
+    # Pod-native delivery (design spec §8) loads the table with nft -f
+    # in the pod's OWN netns, and the reconciler reads the "host" table
+    # the same way (no nsenter) — both are only the HOST's netns when
+    # the pod is hostNetwork. Without it the rule loads in the pod's
+    # isolated netns: the probe, metrics, and reconciler all read it
+    # there and report protected while the host netns (kubelet, sshd,
+    # hostNetwork pods) stays bare (found live by a customer on a
+    # real fleet — the hostNetwork regression this test guards).
+    out = helm_template()
+    assert "hostNetwork: true" in out
+    # The standard companion (the sibling chart's reviewed pattern):
+    # cluster DNS stays resolvable for hostNetwork pods.
+    assert "dnsPolicy: ClusterFirstWithHostNet" in out
+
+
 def test_mitigations_env_renders_mode():
     # AUTO mode renders NO mode var — the role's defaults own it.
     out = helm_template()

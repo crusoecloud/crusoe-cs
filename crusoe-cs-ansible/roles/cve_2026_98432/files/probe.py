@@ -106,6 +106,19 @@ def run(mode):
 
 
 def main():
+    try:
+        _main()
+    except SystemExit:
+        raise
+    except Exception as exc:  # noqa: BLE001 — the exit code IS the contract
+        # A crash (e.g. OSError: Network is unreachable in a lo-down
+        # netns) must NOT read as PASS: Python's default exception exit
+        # is 1, the PASS code. Exit 3 = "probe could not run".
+        print(f"probe CRASHED: {exc!r}")
+        sys.exit(3)
+
+
+def _main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--mode",

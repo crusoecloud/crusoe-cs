@@ -12,7 +12,16 @@ A privileged DaemonSet pod mounts the node's root filesystem at
 `/host` (plus `/proc`, `/sys`, `/dev`) and runs each enabled
 mitigation's wrapper playbook over the `community.general.chroot`
 connection — every module (apt/dnf, systemd, nft) runs with the host's
-own binaries. The generic entrypoint (`mitigate.py`, baked into the
+own binaries.
+
+**Why a DaemonSet (and not the SSH playbook) on Kubernetes:** the
+sidecar's per-pod-netns coverage has no SSH equivalent — Cilium
+delivers pod-bound traffic past the host's nft input hook, so only a
+per-netns rule protects pod sockets, and only an always-scheduled
+agent maintains it across pod churn and node replacement. The SSH
+playbook is the right path for bare VMs (see the
+[playbook README](../../playbooks/cve-2026-98432/README.md)); on k8s
+the chart is the delivery. The generic entrypoint (`mitigate.py`, baked into the
 image) runs **every** enabled mitigation (one failure does not block
 the others) and reports each to stdout and the host journal. Failure
 handling is per-mitigation: a once-only failure exits non-zero
@@ -78,10 +87,18 @@ CR for GKE managed collection instead — same port, same exposition).
 ## Delivery: pod-native
 
 The mitigator runs **pod-native** (default): the privileged
-hostNetwork pod uses the IMAGE's own `nft` via netlink against the
-shared host netns — no chroot into host userspace, no host package
+`hostNetwork: true` pod uses the IMAGE's own `nft` via netlink against
+the shared host netns — no chroot into host userspace, no host package
 manager, no host python. Works identically on Ubuntu VMs and minimal
-hosts (COS). Persistence auto-detects: a writable host `/etc` (via
+hosts (COS).
+
+> **History:** chart versions before the next release rendered the
+> DaemonSet WITHOUT `hostNetwork` — the rule loaded in the pod's
+> isolated netns while every check read it there and reported
+> protected. Fixed after the hostNetwork regression; the chart's unit
+> test now pins it.
+
+Persistence auto-detects: a writable host `/etc` (via
 `/host`) installs the boot unit for instant post-reboot coverage;
 otherwise the chart's scheduled re-run interval is the persistence
 (the honest model on hosts that are replaced rather than rebooted).
