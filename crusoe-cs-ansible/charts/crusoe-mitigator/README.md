@@ -26,8 +26,10 @@ image) runs **every** enabled mitigation (one failure does not block
 the others) and reports each to stdout and the host journal. Failure
 handling is per-mitigation: a once-only failure exits non-zero
 immediately (the CrashLoop backoff is the retry cadence); a scheduled
-failure rides to the next run and only CrashLoops after 3 consecutive
-failures (`MITIGATION_MAX_CONSECUTIVE_FAILURES`) — a transient failure
+failure rides the retry backoff — `mitigationFailureRetryBaseSeconds`
+(30s) doubling per consecutive failure, capped at the mitigation's
+interval — and only CrashLoops after 3 consecutive failures
+(`mitigationMaxConsecutiveFailures`) — a transient failure
 in one mitigation must not kill the pod and with it every other
 mitigation's schedule. On SIGTERM (pod deletion) the entrypoint
 drains: the in-flight playbook finishes, no new run starts, exit 0.

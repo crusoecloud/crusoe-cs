@@ -150,10 +150,19 @@ probes:
 terminationGracePeriodSeconds: 10
 
 # -- Scheduled mitigations CrashLoop after this many consecutive
-#    failures (a transient failure rides to the next scheduled run;
-#    once-only failures CrashLoop immediately — the backoff is the
-#    retry cadence).
+#    failures (a transient failure rides the retry backoff above;
+#    once-only failures CrashLoop immediately — the CrashLoop backoff
+#    is the retry cadence). 0 = crash on the first scheduled failure.
 mitigationMaxConsecutiveFailures: 3
+
+# -- Base seconds for the failed-run retry backoff (doubling per
+#    consecutive failure, capped at each mitigation's interval):
+#    30 → 60 → 120... A failed scheduled run retries at this pace
+#    from the failed ATTEMPT — fast enough that drift (a flushed
+#    ruleset) heals in ~30s, spaced enough that a transient blip
+#    burns at most one consecutive-failure strike. 0 restores the
+#    pre-fix immediate-retry behavior.
+mitigationFailureRetryBaseSeconds: 30
 
 # -- Write structured events (start, per-mitigation result, recap) to
 #    the node's systemd journal via the journald_syslog callback plugin.

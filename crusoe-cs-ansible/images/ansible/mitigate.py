@@ -34,6 +34,11 @@ Environment:
   MITIGATION_MAX_CONSECUTIVE_FAILURES
                        scheduled mitigations CrashLoop after this many
                        consecutive failures (default 3)
+  MITIGATION_FAILURE_RETRY_BASE_SECONDS
+                       failed scheduled runs retry with backoff from
+                       this base, doubling per consecutive failure and
+                       capped at the mitigation's interval (default
+                       30; 0 = immediate retries)
   ANSIBLE_WORKDIR      playbook directory (default /opt/ansible; tests
                        override)
   ANSIBLE_JOURNALD_IDENTIFIER  set by the chart to enable journald
@@ -58,6 +63,24 @@ try:
     )
 except ValueError:
     MAX_CONSECUTIVE_FAILURES = 3
+
+# A failed scheduled run retries with exponential backoff from the
+# last ATTEMPT: FAILURE_RETRY_BASE_SECONDS doubling per consecutive
+# failure, capped at the mitigation's interval. The retry must not be
+# immediate (a ~45s transient blip would burn all consecutive-failure
+# strikes in one pass and CrashLoop the pod, killing every other
+# mitigation's schedule), but a full interval is too slow for a
+# security control (3 strikes at 3600s = 3h to CrashLoop; drift
+# stays unhealed for up to an interval). Backoff dissolves the
+# tradeoff: first retry fast (drift heals in ~30s), spacing grows
+# (transients get room), escalation bounded (~3.5min at defaults).
+# 0 restores the old immediate-retry behavior.
+try:
+    FAILURE_RETRY_BASE_SECONDS = int(
+        os.environ.get("MITIGATION_FAILURE_RETRY_BASE_SECONDS", "30")
+    )
+except ValueError:
+    FAILURE_RETRY_BASE_SECONDS = 30
 
 # Event-driven mode flips: watch the node's mode label; a change
 # forces the scheduled mitigations due immediately (no pod delete, no
@@ -202,6 +225,16 @@ def run_mitigation(name, playbook, vars_argv):
     return result.returncode
 
 
+def failure_retry_delay(interval, consecutive):
+    """Seconds until the next retry of a failed scheduled run:
+    FAILURE_RETRY_BASE_SECONDS doubling per consecutive failure,
+    capped at the mitigation's interval (never slower than the
+    schedule itself; 0 base = immediate retry)."""
+    if FAILURE_RETRY_BASE_SECONDS <= 0:
+        return 0
+    return min(interval, FAILURE_RETRY_BASE_SECONDS * 2 ** (consecutive - 1))
+
+
 def failure_is_fatal(interval, consecutive):
     """Whether a failure should CrashLoop the pod now.
 
@@ -213,6 +246,23 @@ def failure_is_fatal(interval, consecutive):
     if interval <= 0:
         return True
     return consecutive >= MAX_CONSECUTIVE_FAILURES
+
+
+def watch_url(api, node, timeout_seconds):
+    """The watch URL for the node's mode label.
+
+    MUST be the list+fieldSelector form: the single-resource form
+    (?watch=true on a named object) is NOT a watch — the API server
+    serves it as a plain GET (current object, connection closed
+    immediately), and the watcher reconnects in a tight loop: a flood
+    of API calls and lost logs (found live on CMK and GKE — millions
+    of requests/day/pod). The list form streams real watch events and
+    holds the connection for timeout_seconds."""
+    return (
+        f"{api}/api/v1/nodes?watch=true"
+        f"&fieldSelector=metadata.name%3D{node}"
+        f"&timeoutSeconds={timeout_seconds}"
+    )
 
 
 def watch_event_mode(event, label):
@@ -235,8 +285,9 @@ def watch_event_mode(event, label):
     return labels.get(label, "")
 
 
-class _StopLoop(Exception):
-    """Test-only: unwind main() at a chosen point."""
+class _StopLoop(BaseException):
+    """Test-only: unwind main() at a chosen point. BaseException so a
+    broad `except Exception` (the watcher's) cannot swallow it."""
 
 
 class NodeModeWatcher(threading.Thread):
@@ -244,7 +295,11 @@ class NodeModeWatcher(threading.Thread):
     sets the mode event so the scheduler re-runs the scheduled
     mitigations immediately. The watch stream reconnects on any
     error with a bounded backoff — a dropped connection must not
-    kill the watcher (the interval re-run remains the floor)."""
+    kill the watcher (the interval re-run remains the floor). A
+    stream that ends EARLY (clean EOF before the 300s timeout) is
+    degraded: it reconnects at the bounded, growing backoff and
+    logs the degradation — an early-ending stream must never
+    reconnect instantly (the tight-loop flood, found live)."""
 
     def __init__(self, node_name, label, on_change):
         super().__init__(daemon=True)
@@ -268,6 +323,7 @@ class NodeModeWatcher(threading.Thread):
 
         backoff = 1
         while True:
+            stream_started = time.monotonic()
             try:
                 # In-cluster config: the service account token + the
                 # cluster CA the kubelet injects (urllib does not read
@@ -285,11 +341,10 @@ class NodeModeWatcher(threading.Thread):
                     + ":"
                     + os.environ["KUBERNETES_SERVICE_PORT"]
                 )
-                url = f"{api}/api/v1/nodes/{self._node}?watch=true&timeoutSeconds=300"
+                url = watch_url(api, self._node, 300)
                 req = urllib.request.Request(url)
                 req.add_header("Authorization", f"Bearer {token}")
                 with urllib.request.urlopen(req, timeout=310, context=ctx) as resp:
-                    backoff = 1
                     for line in resp:
                         if not line.strip():
                             continue
@@ -306,6 +361,11 @@ class NodeModeWatcher(threading.Thread):
                             # connection gap still fires.
                             self._last_mode = mode
                             self._ever_connected = True
+                            log.info(
+                                "%s: node mode watch connected (baseline mode=%r)",
+                                NODE_NAME,
+                                mode,
+                            )
                             continue
                         if mode != self._last_mode:
                             self._last_mode = mode
@@ -316,9 +376,32 @@ class NodeModeWatcher(threading.Thread):
                                 mode,
                             )
                             self._on_change()
+                # Clean EOF. A stream that held for the full timeout is
+                # the healthy cycle — reconnect immediately and reset
+                # the backoff. A stream that ended early is a DEGRADED
+                # watch (API server closing, LB idle timeout):
+                # reconnect at the bounded, GROWING backoff and LOG it
+                # — the pre-fix loop reconnected instantly and
+                # silently, flooding the API server.
+                held = time.monotonic() - stream_started
+                if held < 300:
+                    log.warning(
+                        "%s: node mode watch stream ended after %.1fs "
+                        "(expected ~300s); reconnecting in %ss",
+                        NODE_NAME,
+                        held,
+                        backoff,
+                    )
+                    time.sleep(backoff)
+                    backoff = min(backoff * 2, 60)
+                else:
+                    backoff = 1
+            except _StopLoop:
+                raise
             except Exception as exc:  # noqa: BLE001 — the watcher must survive
                 log.warning(
-                    "node mode watch failed (%s); reconnecting in %ss",
+                    "%s: node mode watch failed (%s); reconnecting in %ss",
+                    NODE_NAME,
                     exc,
                     backoff,
                 )
@@ -376,6 +459,15 @@ def main():
 
     # name -> monotonic time of last successful run.
     last_run = {}
+    # name -> monotonic time of last ATTEMPT (scheduled mitigations):
+    # a failed run retries at min(interval, FAILURE_RETRY_BASE_SECONDS
+    # doubling per consecutive failure) since the ATTEMPT — scheduling
+    # the retry from the last SUCCESS would make a previously-healthy
+    # mitigation retry immediately (its next_due was already in the
+    # past), burning all consecutive-failure strikes in one transient
+    # blip and CrashLooping the pod (and every other mitigation's
+    # schedule with it).
+    last_attempt = {}
     # name -> consecutive-failure count (scheduled mitigations only).
     consecutive_failures = {}
     scheduled = [m for m in mitigations if m[3] > 0]
@@ -403,12 +495,29 @@ def main():
             # due immediately — the label flip converges in seconds.
             if _mode_event.is_set() and interval > 0:
                 due = True
+            # A failed scheduled run is not due again until the
+            # backoff has passed since the ATTEMPT (see last_attempt):
+            # base doubling per consecutive failure, capped at the
+            # interval — immediate retries burn all strikes in one
+            # transient blip; a full interval is too slow to heal
+            # drift and to CrashLoop.
+            if interval > 0 and name in last_attempt:
+                retry_every = failure_retry_delay(
+                    interval, consecutive_failures.get(name, 1)
+                )
+                due = due and now - last_attempt[name] >= retry_every
             if not due:
                 continue
             if run_mitigation(name, playbook, vars_argv) == 0:
                 last_run[name] = time.monotonic()
                 consecutive_failures[name] = 0
+                # The failure episode is over: clear the attempt pacing
+                # (a stale last_attempt pins the sleep calc at delay=0
+                # while the due-gate blocks — a hot spin) and resume
+                # the normal success schedule.
+                last_attempt.pop(name, None)
             else:
+                last_attempt[name] = time.monotonic()
                 consecutive_failures[name] = consecutive_failures.get(name, 0) + 1
                 failures.append(name)
         # Clear the mode event ONLY when a scheduled mitigation consumed
@@ -452,10 +561,21 @@ def main():
 
         # Sleep until the earliest next due time among scheduled runs,
         # waking early on a mode-change event (event-driven flips).
+        # Per name: interval since the last success — but after a
+        # failure, the retry is paced from the last ATTEMPT by the
+        # backoff (the success-based schedule resumes only after the
+        # next success; pacing the sleep on last_run alone yields
+        # delay=0 with nothing due: a hot spin).
         now = time.monotonic()
-        next_due = min(
-            last_run.get(name, now) + interval for name, _, _, interval in scheduled
-        )
+        next_due = None
+        for name, _, _, interval in scheduled:
+            if name in last_attempt:
+                due_at = last_attempt[name] + failure_retry_delay(
+                    interval, consecutive_failures.get(name, 1)
+                )
+            else:
+                due_at = last_run.get(name, now) + interval
+            next_due = due_at if next_due is None else min(next_due, due_at)
         delay = max(0.0, next_due - now)
         sleep_slices(delay, lambda: draining or _mode_event.is_set())
 

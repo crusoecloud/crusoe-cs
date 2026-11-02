@@ -107,6 +107,24 @@ spec:
             {{- if .Values.mitigationMaxConsecutiveFailures }}
             - name: MITIGATION_MAX_CONSECUTIVE_FAILURES
               value: "{{ .Values.mitigationMaxConsecutiveFailures }}"
+            {{- else if hasKey .Values "mitigationMaxConsecutiveFailures" }}
+            # 0 = crash on the first scheduled failure (the operator's
+            # explicit choice) — render it; the bare `if` above treats
+            # 0 as falsy and would silently fall back to the default 3.
+            - name: MITIGATION_MAX_CONSECUTIVE_FAILURES
+              value: "0"
+            {{- end }}
+            {{- if .Values.mitigationFailureRetryBaseSeconds }}
+            # Failed-run retry backoff base (doubling per consecutive
+            # failure, capped at the mitigation's interval).
+            - name: MITIGATION_FAILURE_RETRY_BASE_SECONDS
+              value: "{{ .Values.mitigationFailureRetryBaseSeconds }}"
+            {{- else if hasKey .Values "mitigationFailureRetryBaseSeconds" }}
+            # 0 is the documented escape hatch (immediate retries) —
+            # render it explicitly; the bare `if` above treats 0 as
+            # falsy and would silently fall back to the default 30.
+            - name: MITIGATION_FAILURE_RETRY_BASE_SECONDS
+              value: "0"
             {{- end }}
             # Event-driven mode flips: the entrypoint watches the
             # node's mode label; a change forces the scheduled

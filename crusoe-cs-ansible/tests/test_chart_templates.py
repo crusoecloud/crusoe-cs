@@ -177,12 +177,39 @@ def test_termination_grace_period_configurable():
     assert "terminationGracePeriodSeconds: 30" in out
 
 
+def test_failure_threshold_zero_renders():
+    # 0 = crash on the first scheduled failure (the operator's
+    # explicit choice) — it MUST render, not silently fall back to
+    # the default 3 (a bare `if` treats 0 as falsy).
+    out = helm_template("--set", "mitigationMaxConsecutiveFailures=0")
+    assert "MITIGATION_MAX_CONSECUTIVE_FAILURES" in out
+    assert 'value: "0"' in out
+
+
 def test_failure_threshold_env_rendered():
     out = helm_template()
     assert "MITIGATION_MAX_CONSECUTIVE_FAILURES" in out
     assert 'value: "3"' in out
     out = helm_template("--set", "mitigationMaxConsecutiveFailures=5")
     assert 'value: "5"' in out
+
+
+def test_failure_retry_backoff_env_rendered():
+    # The failed-run retry backoff base is chart-tunable.
+    out = helm_template()
+    assert "MITIGATION_FAILURE_RETRY_BASE_SECONDS" in out
+    assert 'value: "30"' in out
+    out = helm_template("--set", "mitigationFailureRetryBaseSeconds=60")
+    assert 'value: "60"' in out
+
+
+def test_failure_retry_base_zero_renders():
+    # 0 is the documented escape hatch (immediate retries) — it MUST
+    # render, not silently fall back to the default 30 (a bare `if`
+    # treats 0 as falsy and skips the env var entirely).
+    out = helm_template("--set", "mitigationFailureRetryBaseSeconds=0")
+    assert "MITIGATION_FAILURE_RETRY_BASE_SECONDS" in out
+    assert 'value: "0"' in out
 
 
 def test_auto_mode_default_and_rbac():
@@ -300,9 +327,8 @@ def test_daemonset_has_exactly_one_pod_template():
 
     body = re.search(r"kind: DaemonSet.*", out, re.S).group(0)
     spec_level_templates = re.findall(r"^  template:", body, re.M)
-    assert len(spec_level_templates) == 1, (
-        f"expected exactly one spec-level template:, found "
-        f"{len(spec_level_templates)}"
-    )
+    assert (
+        len(spec_level_templates) == 1
+    ), f"expected exactly one spec-level template:, found {len(spec_level_templates)}"
     # updateStrategy at spec level, BEFORE template:
     assert re.search(r"\n  updateStrategy:.*?\n  template:", body, re.S)

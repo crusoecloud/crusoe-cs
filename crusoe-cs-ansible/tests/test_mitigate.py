@@ -5,6 +5,7 @@ scheduler's due-time arithmetic without running ansible-playbook.
 """
 
 import importlib.util
+import json
 import os
 
 import pytest
@@ -122,6 +123,102 @@ class TestFailureIsolation:
         with pytest.raises(StopLoop):
             mitigate.main()
         assert "consecutive" in caplog.text
+
+    def test_failed_scheduled_retry_waits_not_immediately(self, mitigate, monkeypatch):
+        # A scheduled mitigation that succeeded once, then fails, must
+        # retry at a BOUNDED interval — not immediately. The pre-fix
+        # delay calc used last SUCCESS: after a success, next_due was
+        # already in the past, so a ~45s transient failure burned all 3
+        # consecutive-failure strikes in one blip and CrashLooped the
+        # pod (killing every other mitigation's schedule with it).
+        calls = {"n": 0}
+        clock = {"t": 100.0}
+        sleeps = []
+
+        def flaky(name, playbook, argv):
+            calls["n"] += 1
+            return 0 if calls["n"] == 1 else 1
+
+        def fake_sleep(s):
+            sleeps.append(s)
+            clock["t"] += s
+
+        monkeypatch.setattr(mitigate, "MITIGATIONS_ENV", "sched|wrapper.yml||3600")
+        monkeypatch.setattr(mitigate, "run_mitigation", flaky)
+        monkeypatch.setattr(mitigate.time, "monotonic", lambda: clock["t"])
+        monkeypatch.setattr(mitigate.time, "sleep", fake_sleep)
+
+        # Runs to the designed CrashLoop (3 consecutive failures).
+        assert mitigate.main() == 1
+        # First run succeeds at t=100 and sleeps its interval (t=3700).
+        # Failed retries then BACK OFF from each attempt: 30s, 60s
+        # (FAILURE_RETRY_BASE=30, doubling per consecutive failure,
+        # capped at the interval) — fast first retry (drift heals in
+        # 30s), growing room for transients. The 3rd failure is fatal
+        # (CrashLoop at ~90s of retries + run time), so only two
+        # retry sleeps occur. Never immediate (pre-fix: all three at
+        # t=100). sleep_slices chops each wait into <=1s slices; the
+        # TOTAL slept time is the contract.
+        assert calls["n"] == 4
+        assert sum(sleeps) == 3600.0 + 30.0 + 60.0
+
+    def test_failure_retry_backoff_capped_at_interval(self, mitigate, monkeypatch):
+        # The backoff must never exceed the mitigation's own interval
+        # (retrying a 45s schedule at 60s would starve it). Interval
+        # 45s, base 30s: retry 1 = 30s (doubling), retry 2 would be
+        # 60s uncapped but is capped at the 45s interval.
+        calls = {"n": 0}
+        clock = {"t": 100.0}
+        sleeps = []
+
+        def always_fail(name, playbook, argv):
+            calls["n"] += 1
+            return 1
+
+        def fake_sleep(s):
+            sleeps.append(s)
+            clock["t"] += s
+
+        monkeypatch.setattr(mitigate, "MITIGATIONS_ENV", "sched|wrapper.yml||45")
+        monkeypatch.setattr(mitigate, "run_mitigation", always_fail)
+        monkeypatch.setattr(mitigate.time, "monotonic", lambda: clock["t"])
+        monkeypatch.setattr(mitigate.time, "sleep", fake_sleep)
+
+        assert mitigate.main() == 1
+        # fail@100 → sleep 30 → fail@130 → sleep 45 (capped, not 60)
+        # → fail@175 → CrashLoop. The cap, not the doubling, sets the
+        # second retry's pace.
+        assert calls["n"] == 3
+        assert sum(sleeps) == 30.0 + 45.0
+
+    def test_failure_retry_base_env_override(self, mitigate, monkeypatch):
+        # The backoff base is operator-tunable; 0 restores the old
+        # immediate-retry behavior (a failure retried on the next
+        # scheduler pass).
+        calls = {"n": 0}
+        clock = {"t": 100.0}
+
+        def flaky(name, playbook, argv):
+            calls["n"] += 1
+            return 0 if calls["n"] == 1 else 1
+
+        monkeypatch.setenv("MITIGATION_FAILURE_RETRY_BASE_SECONDS", "0")
+        spec = importlib.util.spec_from_file_location("mitigate_env3", MITIGATE)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        monkeypatch.setattr(mod, "MITIGATIONS_ENV", "sched|wrapper.yml||3600")
+        monkeypatch.setattr(mod, "run_mitigation", flaky)
+        monkeypatch.setattr(mod.time, "monotonic", lambda: clock["t"])
+        monkeypatch.setattr(
+            mod.time, "sleep", lambda s: clock.__setitem__("t", clock["t"] + s)
+        )
+
+        assert mod.main() == 1
+        # Immediate retries: the first success sleeps its interval
+        # (t=3700), then all 3 failures happen at t=3700 — zero
+        # pacing between attempts (the old behavior, restored).
+        assert calls["n"] == 4
+        assert clock["t"] == 100.0 + 3600.0
 
     def test_main_scheduled_persistent_failure_crashloops(self, mitigate, monkeypatch):
         # 3 consecutive scheduled failures: main() returns 1. The fake
@@ -376,3 +473,192 @@ class TestWatcherReconnect:
         # baseline branch).
         assert w._ever_connected is True
         assert w._last_mode == "observe"
+
+
+class FakeWatchResp:
+    """A urlopen() result whose line iterator ends (clean EOF) after
+    the given lines — the shape of both the healthy timeout cycle and
+    the degraded immediate close."""
+
+    def __init__(self, lines, on_exit=None):
+        self._lines = lines
+        self._on_exit = on_exit
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        if self._on_exit:
+            self._on_exit()
+        return False
+
+    def __iter__(self):
+        return iter(self._lines)
+
+
+def node_event(mode, etype="ADDED", label="m"):
+    return json.dumps(
+        {"type": etype, "object": {"metadata": {"labels": {label: mode}}}}
+    )
+
+
+@pytest.fixture()
+def in_cluster(monkeypatch):
+    """run() reads the in-cluster pieces (SA token, CA, service env);
+    fake them so the watcher loop runs outside a pod."""
+    import builtins
+    import io
+    import ssl
+
+    monkeypatch.setenv("KUBERNETES_SERVICE_HOST", "10.0.0.1")
+    monkeypatch.setenv("KUBERNETES_SERVICE_PORT", "443")
+    real_open = builtins.open
+
+    def fake_open(path, *args, **kwargs):
+        if str(path).endswith("/token"):
+            return io.StringIO("fake-token")
+        if str(path).endswith("/ca.crt"):
+            return io.StringIO("fake-ca")
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", fake_open)
+    monkeypatch.setattr(ssl, "create_default_context", lambda cafile=None: None)
+
+
+class TestWatchUrl:
+    """The watch URL MUST be the list+fieldSelector form: the
+    single-resource form (?watch=true on a named object) is served as
+    a plain GET — current object, connection closed, reconnect flood
+    (found live on CMK and GKE: millions of API requests/day/pod)."""
+
+    def test_uses_the_list_fieldselector_form(self, mitigate):
+        url = mitigate.watch_url("https://api.example:6443", "node-1", 300)
+        assert url == (
+            "https://api.example:6443/api/v1/nodes?watch=true"
+            "&fieldSelector=metadata.name%3Dnode-1&timeoutSeconds=300"
+        )
+
+    def test_never_the_single_resource_form(self, mitigate):
+        url = mitigate.watch_url("https://api.example:6443", "node-1", 300)
+        assert "/nodes/node-1" not in url
+
+
+class TestWatcherRateLimit:
+    """A watch stream that dies early must reconnect at a BOUNDED,
+    growing interval and LOG the degradation — the pre-fix loop
+    reconnected instantly and silently (a clean EOF raised nothing),
+    flooding the API server."""
+
+    def test_first_connect_logs_baseline(
+        self, mitigate, in_cluster, monkeypatch, caplog
+    ):
+        import urllib.request
+
+        def fake_urlopen(req, timeout=None, context=None):
+            return FakeWatchResp([node_event("observe")])
+
+        monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+        monkeypatch.setattr(mitigate.time, "monotonic", lambda: 100.0)
+        monkeypatch.setattr(
+            mitigate.time,
+            "sleep",
+            lambda s: (_ for _ in ()).throw(mitigate._StopLoop()),
+        )
+
+        w = mitigate.NodeModeWatcher("node-1", "m", lambda: None)
+        with pytest.raises(mitigate._StopLoop):
+            w.run()
+        # The first-ever connect is a visible, one-time lifecycle event.
+        assert "node mode watch connected" in caplog.text
+        assert "baseline mode='observe'" in caplog.text
+
+    def test_short_lived_stream_backs_off_and_logs(
+        self, mitigate, in_cluster, monkeypatch, caplog
+    ):
+        import urllib.request
+
+        streams = {"n": 0}
+        sleeps = []
+
+        def fake_urlopen(req, timeout=None, context=None):
+            streams["n"] += 1
+            if streams["n"] > 4:
+                raise mitigate._StopLoop()
+            return FakeWatchResp([node_event("observe")])
+
+        def fake_sleep(s):
+            sleeps.append(s)
+            if len(sleeps) >= 3:
+                raise mitigate._StopLoop()
+
+        monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+        monkeypatch.setattr(mitigate.time, "monotonic", lambda: 100.0)
+        monkeypatch.setattr(mitigate.time, "sleep", fake_sleep)
+
+        w = mitigate.NodeModeWatcher("node-1", "m", lambda: None)
+        with pytest.raises(mitigate._StopLoop):
+            w.run()
+        # Each short-lived stream reconnects after the growing backoff
+        # — never instantly (the pre-fix tight loop).
+        assert sleeps == [1, 2, 4]
+        # And the degradation is VISIBLE (the flood was silent).
+        assert "ended after" in caplog.text
+
+    def test_full_cycle_stream_reconnects_without_backoff(
+        self, mitigate, in_cluster, monkeypatch
+    ):
+        import urllib.request
+
+        fired = []
+        streams = {"n": 0}
+        clock = {"t": 100.0}
+
+        def fake_urlopen(req, timeout=None, context=None):
+            streams["n"] += 1
+            if streams["n"] == 3:
+                raise mitigate._StopLoop()
+            lines = [node_event("observe")]
+            if streams["n"] == 2:
+                # A label flip mid-stream on the second cycle.
+                lines.append(node_event("enforce", "MODIFIED"))
+            return FakeWatchResp(
+                lines, on_exit=lambda: clock.__setitem__("t", clock["t"] + 300)
+            )
+
+        def no_sleep(s):
+            raise mitigate._StopLoop(f"healthy cycle must not back off (slept {s}s)")
+
+        monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+        monkeypatch.setattr(mitigate.time, "monotonic", lambda: clock["t"])
+        monkeypatch.setattr(mitigate.time, "sleep", no_sleep)
+
+        w = mitigate.NodeModeWatcher("node-1", "m", lambda: fired.append(1))
+        with pytest.raises(mitigate._StopLoop):
+            w.run()
+        # Two full cycles: no backoff sleeps, and the mid-stream flip
+        # fired exactly once.
+        assert streams["n"] == 3
+        assert fired == [1]
+        assert w._last_mode == "enforce"
+
+    def test_error_backs_off_and_logs(self, mitigate, in_cluster, monkeypatch, caplog):
+        import urllib.request
+
+        calls = {"n": 0}
+        sleeps = []
+
+        def fake_urlopen(req, timeout=None, context=None):
+            calls["n"] += 1
+            if calls["n"] > 2:
+                raise mitigate._StopLoop()
+            raise OSError("connection refused")
+
+        monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+        monkeypatch.setattr(mitigate.time, "monotonic", lambda: 100.0)
+        monkeypatch.setattr(mitigate.time, "sleep", sleeps.append)
+
+        w = mitigate.NodeModeWatcher("node-1", "m", lambda: None)
+        with pytest.raises(mitigate._StopLoop):
+            w.run()
+        assert sleeps == [1, 2]
+        assert "watch failed" in caplog.text
