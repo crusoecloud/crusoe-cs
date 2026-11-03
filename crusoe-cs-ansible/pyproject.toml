@@ -1,0 +1,43 @@
+# The ONE canonical lint/format/type config for crusoe-cs-ansible.
+# All three tools discover this file automatically — CI runs them
+# with no per-tool flags, and the editor extensions (ruff,
+# mypy-type-checker) read the same file. A rule change lands here
+# and reaches CI + every editor with zero sync steps.
+#
+# The formatter is RUFF FORMAT (Black-parity; the one known
+# divergence — trailing-comment wraps — was resolved by adopting
+# ruff format's output repo-wide). Black is no longer used.
+
+[tool.ruff]
+# The linter AND formatter (CI: `ruff check --no-fix` +
+# `ruff format --check`). ruff format is Black-parity; the one
+# divergence (trailing-comment wraps) was adopted repo-wide.
+line-length = 88
+target-version = "py314"
+
+[tool.ruff.format]
+# Black-style formatting, quote-style included (used by the editor's
+# organize-imports action; CI's formatter is Black).
+quote-style = "double"
+indent-style = "space"
+
+[tool.ruff.lint]
+# Start from Black-adjacent defaults; add the style rules the IDE was
+# already flagging (pycodestyle's E/W) so editor and CI agree.
+select = ["E", "W", "F", "I"]
+# E501 (line-too-long) is the formatter's job — Black wraps; the
+# check would fight the formatter on edge cases.
+ignore = ["E501"]
+
+[tool.ruff.lint.isort]
+# Match the existing import style (stdlib, then third-party).
+known-first-party = []
+
+[tool.mypy]
+# The type checker (CI: `mypy`). The codebase is unannotated; this
+# catches the inference-level defects (Optional access, arg types)
+# without demanding annotations.
+ignore_missing_imports = true
+# The reconciler ships in the alpine image (python3 stdlib only) —
+# keep it import-light.
+warn_unused_ignores = false

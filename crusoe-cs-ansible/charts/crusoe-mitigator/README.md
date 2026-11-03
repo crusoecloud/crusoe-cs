@@ -187,6 +187,20 @@ installs the same rule in each pod netns via `nsenter` + the host's
 DROPPED (netns rule counter increments), plain traffic unaffected,
 fresh pods auto-covered.
 
+The `/host` mounts (sidecar and mitigator containers) carry
+`mountPropagation: HostToContainer`: the reconciler enters pod netns
+via the `/run/netns/<id>` bind mounts the CNI creates AFTER the
+mitigator pod started — without propagation those mounts are
+invisible inside the container, `nsenter` fails `Invalid argument`,
+and the event-driven path silently degrades to the interval fallback
+(found live: fresh pods ran ~10s uncovered). The
+reconciler diagnoses every EINVAL skip against the two
+mount-namespace views it can read (hostPID): a mount the host has
+but this container lacks WARNs naming the propagation fix, while a
+stale leftover (pod gone) logs benign INFO — so a propagation
+regression cannot hide (the chart's unit test pins the field) and
+pod churn does not flood a WARN-level console.
+
 ## Verification
 
 ```bash

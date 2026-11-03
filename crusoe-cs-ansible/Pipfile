@@ -14,10 +14,11 @@ kubernetes = "*"
 ansible-lint = "*"
 yamllint = "*"
 pytest = "*"
-# The formatter (canonical) + the linter. CI runs `black --check` +
-# `ruff check`; the IDE picks the lint rules from ruff.toml.
-black = "*"
+# The formatter + linter + type checker — the same trio CI runs
+# (ruff format, ruff check, mypy), all discovering pyproject.toml.
+# Black is no longer used anywhere.
 ruff = ">=0.8"
+mypy = "*"
 
 [requires]
 python_version = "3.14"

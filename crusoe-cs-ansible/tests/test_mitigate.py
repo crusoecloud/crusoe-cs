@@ -17,6 +17,7 @@ MITIGATE = os.path.join(HERE, "..", "images", "ansible", "mitigate.py")
 @pytest.fixture()
 def mitigate():
     spec = importlib.util.spec_from_file_location("mitigate", MITIGATE)
+    assert spec and spec.loader, f"mitigate not found at {MITIGATE}"
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
@@ -98,6 +99,7 @@ class TestFailureIsolation:
         import importlib.util
 
         spec = importlib.util.spec_from_file_location("mitigate_env2", MITIGATE)
+        assert spec and spec.loader, f"mitigate_env2 not found at {MITIGATE}"
         mod2 = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod2)
         assert mod2.failure_is_fatal(interval=60, consecutive=2) is True

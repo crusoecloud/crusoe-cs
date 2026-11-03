@@ -1,6 +1,9 @@
 # -*- coding: utf-8 -*-
 # Copyright: (c) 2026, Crusoe Cloud Support
 # GNU General Public License v3.0+ (see COPYING or https://www.gnu.org/licenses/gpl-3.0.txt)
+# ruff: noqa: E402
+# (The DOCUMENTATION/EXAMPLES blocks must precede the imports — the
+# ansible plugin contract — so every import sits below them by design.)
 
 DOCUMENTATION = r'''
 name: journald_syslog

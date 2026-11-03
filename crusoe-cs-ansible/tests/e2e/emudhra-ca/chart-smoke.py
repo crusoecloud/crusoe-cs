@@ -58,6 +58,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from typing import NoReturn
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 CHARTS_DIR = os.path.join(REPO_ROOT, "charts")
@@ -94,7 +95,7 @@ def log(msg: str) -> None:
     print(f"{log_prefix} {msg}")
 
 
-def die(msg: str) -> None:
+def die(msg: str) -> NoReturn:
     print(f"{log_prefix} FAIL: {msg}", file=sys.stderr)
     sys.exit(1)
 
@@ -106,6 +107,7 @@ def run(
     input_text: str | None = None,
     env: dict | None = None,
     quiet: bool = False,
+    capture_output: bool = False,
 ) -> subprocess.CompletedProcess:
     """Run a command; optionally raise on failure. Never uses a shell."""
     return subprocess.run(
@@ -113,7 +115,7 @@ def run(
         check=check,
         input=input_text,
         env=env,
-        capture_output=True,
+        capture_output=capture_output,
         text=True,
     )
 
@@ -640,7 +642,7 @@ def main() -> None:
             )
             if not agent_pod:
                 # Label may differ across versions; fall back to prefix.
-                agent_pod = out(
+                pod_names = out(
                     [
                         "kubectl",
                         "get",
@@ -654,7 +656,7 @@ def main() -> None:
                     ]
                 ).splitlines()
                 agent_pod = next(
-                    (p.removeprefix("pod/") for p in agent_pod if "watch-agent" in p),
+                    (p.removeprefix("pod/") for p in pod_names if "watch-agent" in p),
                     "",
                 )
             if not agent_pod:

@@ -103,7 +103,7 @@ _STDOUT.setFormatter(
         "%(asctime)s [crusoe-mitigator] %(message)s", "%Y-%m-%dT%H:%M:%SZ"
     )
 )
-_STDOUT.converter = time.gmtime
+setattr(_STDOUT, "converter", time.gmtime)
 
 
 class JournalHandler(logging.Handler):

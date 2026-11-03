@@ -65,11 +65,22 @@ mitigations:
     #    state — absent = observe (the sane default; nothing drops
     #    without an explicit operator action), mode=enforce = enforce
     #    (the deliberate action), mode=observe = the sanctioned R1
-    #    downgrade. To PIN the mode instead (air-gapped clusters, the
+    #    downgrade. After Stage 4 completes, PIN the mode here (the
+    #    steady-state release sets cve_2026_98432_mode: enforce) so
+    #    NEW nodes that join without a label load enforce from the
+    #    release — no per-node labeling in steady state.
+    #    NB: TWO REGIMES, NEVER MIXED. The label resolution runs only
+    #    in auto mode — a PINNED mode IGNORES the label entirely, so
+    #    an R1 label flip (mode=observe) does NOTHING on a pinned
+    #    release (the next run re-imposes the pin). Label-driven =
+    #    rollout era (waves, canary, seconds-fast label rollback);
+    #    pinned = steady state (new nodes self-protect; rollback is a
+    #    helm upgrade — rare and deliberate). Pick one per release.
+    #    To pin for other reasons instead (air-gapped clusters, the
     #    SSH path, a freeze hold), set the role's mode var in `vars`
     #    below — and NEVER via `--set mitigations[0].vars...`: Helm
-    #    REPLACES list elements wholesale, dropping
-    #    name/playbook/enabled and silently disabling the mitigation.
+    #    REPLACES list elements wholesale, dropping name/playbook/enabled and
+    #    silently disabling the mitigation.
     # Metrics: the role's metrics.sh writes cve_2026_98432.prom into
     # the chart hostPath; the metrics-server sidecar serves it on
     # :19698 (see metricsPort / metricsBackend above).
@@ -90,6 +101,19 @@ mitigations:
     # empirically on Cilium v1.19.1), so the host rule alone leaves pod
     # sockets exposed. Harmless on bridge-mode CNIs; no-op on
     # containerless hosts.
+    #
+    # The /host mount carries mountPropagation: HostToContainer
+    # (daemonset.yaml): the reconciler enters pod netns via the
+    # /run/netns/<id> bind mounts the CNI creates AFTER this pod
+    # started — without propagation those mounts are invisible inside
+    # the container and nsenter fails "Invalid argument" (found live:
+    # fresh pods ran ~10s uncovered, the /proc-scan
+    # interval, and the skip was silent). The reconciler also retries
+    # a first-sight EINVAL (the CNI creates the file before mounting
+    # the netns onto it) and diagnoses every skip against the two
+    # mount-namespace views it can read (hostPID): a mount the host
+    # has but this container lacks WARNs naming the propagation fix;
+    # a stale leftover (pod gone) logs benign INFO.
     sidecar:
       command: /usr/local/sbin/cve-2026-98432-netns-reconcile.py
       # Sweep interval (seconds). inotify covers netns that Cilium
@@ -179,6 +203,12 @@ journaldLogging: true
 nodeSelector: {}
 #  node-role.kubernetes.io/worker: ""
 
+# Taints the mitigator tolerates. EMPTY means the DaemonSet stays off
+# tainted nodes — which often includes GPU nodes (found by review:
+# a fleet with GPU taints silently lacked coverage there).
+# To cover tainted nodes, e.g.:
+#   tolerations:
+#   - operator: Exists
 tolerations: []
 
 imagePullSecrets: []

@@ -151,8 +151,16 @@ spec:
           command:
             - /usr/local/sbin/mitigate.py
           volumeMounts:
+            # HostToContainer (rslave): the reconciler enters pod netns
+            # via the /run/netns/<id> bind mounts the CNI creates
+            # AFTER this pod started — without propagation the mount is
+            # a snapshot and those mounts are invisible here (nsenter
+            # then fails "Invalid argument"; found live: every pod
+            # scheduled after the mitigator was covered only by the
+            # 10s /proc-scan fallback).
             - name: host-root
               mountPath: /host
+              mountPropagation: HostToContainer
             - name: host-proc
               mountPath: /host/proc
             - name: host-sys
@@ -232,8 +240,15 @@ spec:
           volumeMounts:
             # Sidecars chroot to /host for host tooling and walk /proc
             # (hostPID gives them the host's PID namespace).
+            # HostToContainer (rslave): the reconciler's nsenter enters
+            # pod netns via the /run/netns/<id> bind mounts the CNI
+            # creates AFTER this pod started — without propagation
+            # those mounts are invisible inside this container and
+            # nsenter fails "Invalid argument" (found live: fresh pods
+            # stayed uncovered for ~10s, the /proc-scan interval).
             - name: host-root
               mountPath: /host
+              mountPropagation: HostToContainer
             - name: host-proc
               mountPath: /host/proc
         {{- end }}

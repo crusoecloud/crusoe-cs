@@ -366,6 +366,29 @@
   register: cve_2026_98432_unit_file
   when: cve_2026_98432_host_etc_writable.stdout == 'yes'
 
+- name: Enable the boot unit (pod-native symlink fallback)
+  # The systemd task below drives enablement where systemctl exists
+  # (SSH/chroot targets). Pod-native (the chart default) runs in the
+  # alpine image — no systemctl — so nothing ever created the
+  # multi-user.target.wants symlink: the unit sat INSTALLED but
+  # DISABLED, and a reboot left the node unprotected until the
+  # chart's scheduled re-run (found live on CMK: 4/5 nodes enabled
+  # by an SSH-era run, the node that joined after the chart took
+  # over disabled). A wants symlink is a plain file operation —
+  # create it directly. The TARGET is host-absolute (the HOST's
+  # systemd resolves it — /host does not exist on the host); the
+  # symlink itself is created through the pod's /host mount.
+  # Idempotent: file state=link is a no-op when the link already
+  # points at the unit.
+  ansible.builtin.file:
+    src: /etc/systemd/system/{{ cve_2026_98432_unit }}
+    dest: "{{ '/host' if cve_2026_98432_pod_native | bool else '' }}/etc/systemd/system/multi-user.target.wants/{{ cve_2026_98432_unit }}"
+    state: link
+    force: true
+  when: >-
+    cve_2026_98432_pod_native | bool
+    and cve_2026_98432_host_etc_writable.stdout == 'yes'
+
 - name: Report interval-only persistence
   ansible.builtin.debug:
     msg: >-
@@ -373,7 +396,13 @@
       skipped; persistence is the chart's scheduled re-run interval.
       The rule is live NOW; a node reboot is covered on the next
       scheduled run (or the DaemonSet rescheduling the pod).
-  when: cve_2026_98432_host_etc_writable.stdout != 'yes' or cve_2026_98432_systemd_usable.rc != 0
+  # Pod-native with a writable host /etc enabled the boot unit via
+  # the symlink fallback — persistence is NOT interval-only there.
+  when: >-
+    (cve_2026_98432_host_etc_writable.stdout != 'yes'
+     or cve_2026_98432_systemd_usable.rc != 0)
+    and not (cve_2026_98432_pod_native | bool
+             and cve_2026_98432_host_etc_writable.stdout == 'yes')
 
 # A run with an unchanged file still reloads the table when someone
 # deleted it out-of-band: the check below fails, and the load runs.

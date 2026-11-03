@@ -58,6 +58,34 @@ def test_default_render_has_sidecar_and_annotations():
     assert "serve-metrics.py" in out
 
 
+def test_host_root_mounts_propagate_host_mounts():
+    # The reconciler enters pod netns via the /host/run/netns/<id>
+    # bind mounts the CNI creates AFTER this pod started. A hostPath
+    # mount without mountPropagation is a snapshot: mounts created
+    # later on the host are INVISIBLE inside the container, so
+    # nsenter opens a plain file and fails with "Invalid argument"
+    # — every pod scheduled after the mitigator stays uncovered
+    # until the /proc scan catches it (found live:
+    # ~10s exposure window per fresh pod). HostToContainer (rslave
+    # under the hood) makes the host's mounts visible here. Required
+    # on BOTH containers that mount host-root: the sidecar (sweep,
+    # --verify, --undo) and the mitigator (the purge op's fallback
+    # exec target).
+    import yaml
+
+    out = helm_template()
+    docs = [d for d in yaml.safe_load_all(out) if d]
+    doc = next(d for d in docs if d["kind"] == "DaemonSet")
+    containers = doc["spec"]["template"]["spec"]["containers"]
+    for cname in ("mitigator", "cve-2026-98432-sidecar"):
+        c = next(x for x in containers if x["name"] == cname)
+        mounts = [m for m in c["volumeMounts"] if m["name"] == "host-root"]
+        assert len(mounts) == 1, f"{cname}: expected exactly one host-root mount"
+        assert mounts[0].get("mountPropagation") == "HostToContainer", (
+            f"{cname}: host-root mount must propagate host mounts"
+        )
+
+
 def test_pod_spec_requires_hostnetwork():
     # Pod-native delivery (design spec §8) loads the table with nft -f
     # in the pod's OWN netns, and the reconciler reads the "host" table
@@ -65,7 +93,7 @@ def test_pod_spec_requires_hostnetwork():
     # the pod is hostNetwork. Without it the rule loads in the pod's
     # isolated netns: the probe, metrics, and reconciler all read it
     # there and report protected while the host netns (kubelet, sshd,
-    # hostNetwork pods) stays bare (found live by a customer on a
+    # hostNetwork pods) stays bare (found live on a
     # real fleet — the hostNetwork regression this test guards).
     out = helm_template()
     assert "hostNetwork: true" in out
@@ -298,11 +326,14 @@ def test_mitigations_line_parses_through_the_entrypoint():
     out = helm_template()
     import re
 
-    line = re.search(r"cve-2026-98432\|.*\|3600", out).group(0)
+    match = re.search(r"cve-2026-98432\|.*\|3600", out)
+    assert match, "no MITIGATIONS line in the rendered chart"
+    line = match.group(0)
     spec = importlib.util.spec_from_file_location(
         "mitigate",
         os.path.join(HERE, "..", "images", "ansible", "mitigate.py"),
     )
+    assert spec and spec.loader, "mitigate.py not found"
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     parsed = mod.parse_mitigations(line)
@@ -316,6 +347,28 @@ def test_mitigations_line_parses_through_the_entrypoint():
         assert "=" in argv[i + 1]
 
 
+def test_emudhra_run_wires_capture_output():
+    # chart-smoke.py's run() gained a capture_output kwarg (mypy
+    # round) but the body still passed capture_output=True to
+    # subprocess.run unconditionally — a caller asking to stream
+    # output got it captured silently (found by review). The kwarg
+    # must be wired through.
+    import importlib.util
+    import inspect
+
+    spec = importlib.util.spec_from_file_location(
+        "chart_smoke",
+        os.path.join(HERE, "..", "tests", "e2e", "emudhra-ca", "chart-smoke.py"),
+    )
+    assert spec and spec.loader, "chart-smoke.py not found"
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    src = inspect.getsource(mod.run)
+    assert "capture_output=capture_output" in src, (
+        "run() must pass its capture_output kwarg to subprocess.run"
+    )
+
+
 def test_daemonset_has_exactly_one_pod_template():
     # A structural regression spliced updateStrategy INTO the pod
     # template (two template: blocks) — helm v4's server-side apply
@@ -325,10 +378,12 @@ def test_daemonset_has_exactly_one_pod_template():
     # Count template: at the spec level (2-space indent under spec:)
     import re
 
-    body = re.search(r"kind: DaemonSet.*", out, re.S).group(0)
+    body_match = re.search(r"kind: DaemonSet.*", out, re.S)
+    assert body_match, "no DaemonSet in the rendered chart"
+    body = body_match.group(0)
     spec_level_templates = re.findall(r"^  template:", body, re.M)
-    assert (
-        len(spec_level_templates) == 1
-    ), f"expected exactly one spec-level template:, found {len(spec_level_templates)}"
+    assert len(spec_level_templates) == 1, (
+        f"expected exactly one spec-level template:, found {len(spec_level_templates)}"
+    )
     # updateStrategy at spec level, BEFORE template:
     assert re.search(r"\n  updateStrategy:.*?\n  template:", body, re.S)

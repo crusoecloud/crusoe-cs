@@ -176,11 +176,32 @@ def make_handler(metrics_dir):
     return Handler
 
 
+def log_startup(metrics_dir, port):
+    """One startup line to stderr — the reconciler's pattern. The
+    server is deliberately quiet (access logs suppressed; vmagent
+    scrapes every 150s), but TOTAL silence is indistinguishable
+    from a hang before bind: this line is what lets an operator
+    reading pod logs tell 'serving' from 'dead at startup' without
+    external probes. Emitted BEFORE serve_forever so a bind failure
+    still leaves the line in the log."""
+    try:
+        prom_files = [f for f in os.listdir(metrics_dir) if f.endswith(".prom")]
+    except OSError:
+        prom_files = []
+    print(
+        f"serve-metrics: serving {len(prom_files)} prom file(s) from "
+        f"{metrics_dir} on :{port}",
+        file=sys.stderr,
+        flush=True,
+    )
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dir", required=True, help="textfile directory")
     parser.add_argument("--port", type=int, default=19698)
     args = parser.parse_args()
+    log_startup(args.dir, args.port)
     with http.server.ThreadingHTTPServer(
         ("0.0.0.0", args.port), make_handler(args.dir)
     ) as srv:

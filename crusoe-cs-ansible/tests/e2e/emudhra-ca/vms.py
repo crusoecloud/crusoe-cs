@@ -80,7 +80,7 @@ SSH_USER = "ubuntu"
 # One directory per run, named by UTC timestamp. Lives in /tmp so run
 # output never touches the repo (no gitignore needed).
 REPORT_DIR = (
-    Path(os.environ.get("EMUDHRA_E2E_VM_REPORT_DIR"))
+    Path(os.environ["EMUDHRA_E2E_VM_REPORT_DIR"])
     if os.environ.get("EMUDHRA_E2E_VM_REPORT_DIR")
     else Path("/tmp/emudhra-vm-e2e") / time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
 )
@@ -207,7 +207,9 @@ def matrix(images_filter: list[str] | None = None) -> list[dict]:
 # VM lifecycle
 # ---------------------------------------------------------------------------
 def vms_list() -> list[dict]:
-    return crusoe("compute", "vms", "list")
+    listing = crusoe("compute", "vms", "list")
+    assert isinstance(listing, list), f"unexpected vms list shape: {listing!r}"
+    return listing
 
 
 def vm_by_name(name: str) -> dict | None:
