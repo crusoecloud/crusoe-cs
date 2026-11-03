@@ -2,5 +2,5 @@ apiVersion: v2
 name: crusoe-mitigator
 description: Runs configurable security mitigations on every k8s node's host VM via chroot (emudhra, CVE-2026-98432, ...)
 type: application
-version: 0.1.3
+version: 0.1.4
 appVersion: "1.0"
