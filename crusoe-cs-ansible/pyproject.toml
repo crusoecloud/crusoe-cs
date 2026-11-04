@@ -4,9 +4,34 @@
 # mypy-type-checker) read the same file. A rule change lands here
 # and reaches CI + every editor with zero sync steps.
 #
-# The formatter is RUFF FORMAT (Black-parity; the one known
-# divergence — trailing-comment wraps — was resolved by adopting
-# ruff format's output repo-wide). Black is no longer used.
+# It is ALSO the canonical dependency manifest (uv reads [project]
+# + [dependency-groups]): runtime deps below, dev toolchain in the
+# dev group. uv.lock is the single source of truth for versions —
+# the image and CI install from it (uv sync --frozen / --locked).
+
+[project]
+name = "crusoe-cs-ansible"
+version = "0.1.0"
+requires-python = ">=3.14"
+# ansible-core only — NOT the full `ansible` package: it bundles ~100
+# collections (~700MB) that this repo manages explicitly via
+# requirements.yml, and its ansible-core pin (~=2.21.5 for ansible 14)
+# would freeze the lock below the versions the image ships.
+dependencies = [
+    "ansible-core==2.22.0",
+    "kubernetes",
+]
+
+[dependency-groups]
+# The dev toolchain — the same tools CI runs (ruff format/check,
+# mypy, pytest, ansible-lint, yamllint), pinned by uv.lock.
+dev = [
+    "ansible-lint",
+    "mypy",
+    "pytest",
+    "ruff>=0.8",
+    "yamllint",
+]
 
 [tool.ruff]
 # The linter AND formatter (CI: `ruff check --no-fix` +

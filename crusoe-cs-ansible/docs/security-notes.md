@@ -46,9 +46,9 @@ cluster-admin-controlled, like the kubelet itself).
 
 ## Dependency findings
 
-The Pipfile dependency-scanning findings (urllib3, cryptography,
+The dependency-scanning findings (urllib3, cryptography,
 certifi, oauthlib, filelock, ansible-core) are resolved by the
-lockfile update (see the repo's Pipfile.lock); the certifi bundle is
+lockfile update (see the repo's uv.lock); the certifi bundle is
 verified to carry none of the distrusted eMudhra root fingerprints
 (the emudhra_ca role's `emudhra_ca_bad_roots` list) — in the venv and
 in the built image.

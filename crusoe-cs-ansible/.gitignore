@@ -19,3 +19,4 @@ tests/cve-2026-98432/e2e/inventory.tmp
 # agent working scratch (SDD briefs, ledgers)
 .superpowers/
 .ansible/
+Pipfile

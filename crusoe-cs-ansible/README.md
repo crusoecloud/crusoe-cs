@@ -78,12 +78,9 @@ Adds or removes the SSH authorized keys defined in
 Install the following before running bootstrap:
 
 ```bash
-# pyenv — Python version management
-brew install pyenv
-echo 'eval "$(pyenv init -)"' >> ~/.zshrc && source ~/.zshrc
-
-# pipenv — virtualenv + package management
-pip install --user pipenv
+# uv — Python + virtualenv + package management (manages its own
+# Pythons; .python-version is honored)
+brew install uv
 
 # direnv — per-directory environment activation
 brew install direnv
@@ -114,6 +111,41 @@ Bootstrap installs the pinned Python version (3.14), creates the virtualenv,
 installs Ansible + dependencies, and installs the required collections. direnv
 activates the virtualenv and adds `scripts/` to `PATH` whenever you enter the
 repo.
+
+## Updating Python dependencies
+
+The image installs Python packages from `uv.lock` pins — the lock is the
+single source of truth for what ships. To bump a version:
+
+```bash
+# 1. Edit the pin in pyproject.toml (e.g. ansible-core = "==2.22.1")
+# 2. Regenerate the lock:
+uv lock
+# 3. Commit pyproject.toml + uv.lock together — the lock change triggers
+#    the image build, and the trust gate re-runs against the new pins.
+```
+
+To preview what an update would change before running it:
+
+```bash
+uv lock --upgrade --dry-run   # shows what a full upgrade would change
+uv lock --check               # verifies the lock is current (no changes)
+```
+
+What `uv lock` does and doesn't upgrade:
+
+- `==`-pinned packages (e.g. `ansible-core`): locked to exactly the pin —
+  the upgrade decision is your edit to pyproject.toml, not the command.
+- Floating constraints (e.g. `kubernetes`, most dev packages): re-resolved
+  to the newest release — running `uv lock` upgrades these as a side
+  effect. `uv lock --upgrade` forces re-resolution for ALL packages.
+- `uv lock --upgrade-package <name>` upgrades one package explicitly.
+
+The `uv-lock-drift` CI job (MRs and branches touching pyproject.toml or
+uv.lock) runs `uv lock --check` and fails when the lock no longer matches
+the manifest's resolution. Because some entries float, this can fire with
+no manifest edit — a floating dep released a newer version upstream. The
+remedy is the same: `uv lock` and commit the result.
 
 ## Inventory
 

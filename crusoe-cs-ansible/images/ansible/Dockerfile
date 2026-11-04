@@ -42,43 +42,40 @@ RUN apk add --no-cache \
       nftables~1 \
       util-linux~2
 
-# Python dependencies: ansible-core (not the full `ansible` package — that
-# bundles ~100 collections and ~700MB; the component's collections are
-# installed explicitly below) + the kubernetes client.
-RUN pip install --no-cache-dir "ansible-core>=2.17" "kubernetes"
+# Python dependencies — installed from uv.lock: the repo's single
+# source of truth for Python versions. `uv sync --frozen` installs
+# exactly the locked runtime deps (no dev group, no floating
+# resolution) into /opt/venv. Bump a version in pyproject.toml,
+# `uv lock`, and the image follows — the lock COPY invalidates this
+# layer and the trust gate downstream re-runs against the new pins.
+# uv is COPY'd from its distro image (single static binary, no pip
+# install at build time; digest-pinned for reproducibility — the
+# INDEX digest, so each build platform pulls its own arch's binary).
+COPY --from=ghcr.io/astral-sh/uv@sha256:96f40d3904aad8d0bd010539001d36c8e2188b981e1334471a90c4a1d93bb490 /uv /uvx /usr/local/bin/
+COPY pyproject.toml uv.lock /tmp/deps/
+# UV_COMPILE_BYTECODE=1: uv sync skips bytecode compilation by
+# default — the image runs as USER runner, which cannot write
+# __pycache__ under /opt/venv, so every ansible/kubernetes import
+# would recompile in memory on EVERY start (kubernetes's generated
+# client tree is thousands of modules; measured 0.82s per import
+# without bytecode). Compile at build time instead (uv's Docker
+# guide recommendation).
+RUN UV_COMPILE_BYTECODE=1 uv venv /opt/venv \
+    && UV_COMPILE_BYTECODE=1 UV_PROJECT_ENVIRONMENT=/opt/venv uv sync --frozen --no-dev --project /tmp/deps \
+    && rm -rf /tmp/deps
+ENV PATH="/opt/venv/bin:${PATH}"
 
 # Ansible collections — same pins as requirements.yml.
 COPY requirements.yml /tmp/requirements.yml
-# --no-cache: the multi-arch build runs this layer CONCURRENTLY per
-# platform, and ansible-galaxy's shared response cache corrupts under
+# --no-cache: ansible-galaxy's shared response cache corrupts under
 # concurrent runs ("Missing expected 'results' in ansible-galaxy
-# cache" — hit twice in CI). The flag is the upstream-recommended
-# workaround; the layer is cached by BuildKit anyway.
+# cache" — hit twice in CI when one multi-arch build ran the layer
+# per platform in parallel). The per-arch build jobs no longer share
+# a builder, but the flag stays: it's the upstream-recommended
+# workaround and the layer is cached by BuildKit anyway.
 RUN ansible-galaxy collection install --no-cache -r /tmp/requirements.yml \
       -p /usr/share/ansible/collections \
     && rm /tmp/requirements.yml
-
-# Bake the DaemonSet payload GENERICALLY: every role, every playbook,
-# every wrapper — the image is a point-in-time snapshot of the repo's
-# remediation catalog. WHICH remedations run is pure chart config
-# (values.yaml's mitigations list names playbooks by path); adding a
-# remediation to the repo needs NO Dockerfile edit, only a rebuild.
-COPY roles/ /opt/ansible/roles/
-COPY playbooks/ /opt/ansible/playbooks/
-COPY images/ansible/*.yml images/ansible/inventory /opt/ansible/
-# Executable payloads: any role file under files/sbin/ lands in PATH
-# (sidecar commands like the pod-netns reconciler reference these
-# paths). The explicit COPY keeps the mode without a build-arg dance.
-COPY --chmod=0755 roles/cve_2026_98432/files/cve-2026-98432-netns-reconcile.py /usr/local/sbin/cve-2026-98432-netns-reconcile.py
-# Generic mitigation entrypoint for the crusoe-mitigator chart: parses
-# the chart-rendered MITIGATIONS list, runs each playbook, parks or
-# CrashLoops. Baked at the path the chart's command expects.
-COPY --chmod=0755 images/ansible/mitigate.py /usr/local/sbin/mitigate.py
-# Generic textfile metrics file-server (chart metrics-server sidecar):
-# serves every *.prom in the chart hostPath on :19698 for vmagent /
-# managed-collection scraping.
-COPY --chmod=0755 images/ansible/serve-metrics.py /usr/local/sbin/serve-metrics.py
-COPY plugins/ /opt/ansible/plugins/
 
 # Non-root runtime user for controller use; playbooks run against
 # local/chroot targets. The DaemonSet pod overrides this via its
@@ -119,7 +116,8 @@ RUN set -eu; \
     }; \
     scan_bundle /etc/ssl/certs/ca-certificates.crt; \
     for pem in /usr/lib/python3*/site-packages/certifi/cacert.pem \
-               /usr/local/lib/python3*/site-packages/certifi/cacert.pem; do \
+               /usr/local/lib/python3*/site-packages/certifi/cacert.pem \
+               /opt/venv/lib/python3*/site-packages/certifi/cacert.pem; do \
       scan_bundle "$pem"; \
     done; \
     echo "trust-store scan: clean"; \
@@ -143,6 +141,32 @@ RUN set -eu; \
 RUN set -eu; \
     ansible --version | head -1; \
     ansible-galaxy collection list | grep -q kubernetes.core
+
+# Bake the DaemonSet payload GENERICALLY: every role, every playbook,
+# every wrapper — the image is a point-in-time snapshot of the repo's
+# remediation catalog. WHICH remedations run is pure chart config
+# (values.yaml's mitigations list names playbooks by path); adding a
+# remediation to the repo needs NO Dockerfile edit, only a rebuild.
+# These COPYs sit AFTER the trust gate + smoke layers so they don't
+# invalidate them: the gate reads only the trust store (apk
+# ca-certificates + pip certifi), which the payload COPYs don't touch
+# — a role/playbook edit re-caches everything above this line.
+COPY roles/ /opt/ansible/roles/
+COPY playbooks/ /opt/ansible/playbooks/
+COPY images/ansible/*.yml images/ansible/inventory /opt/ansible/
+# Executable payloads: any role file under files/sbin/ lands in PATH
+# (sidecar commands like the pod-netns reconciler reference these
+# paths). The explicit COPY keeps the mode without a build-arg dance.
+COPY --chmod=0755 roles/cve_2026_98432/files/cve-2026-98432-netns-reconcile.py /usr/local/sbin/cve-2026-98432-netns-reconcile.py
+# Generic mitigation entrypoint for the crusoe-mitigator chart: parses
+# the chart-rendered MITIGATIONS list, runs each playbook, parks or
+# CrashLoops. Baked at the path the chart's command expects.
+COPY --chmod=0755 images/ansible/mitigate.py /usr/local/sbin/mitigate.py
+# Generic textfile metrics file-server (chart metrics-server sidecar):
+# serves every *.prom in the chart hostPath on :19698 for vmagent /
+# managed-collection scraping.
+COPY --chmod=0755 images/ansible/serve-metrics.py /usr/local/sbin/serve-metrics.py
+COPY plugins/ /opt/ansible/plugins/
 
 WORKDIR /work
 # The security report flags the missing HEALTHCHECK. The entrypoint

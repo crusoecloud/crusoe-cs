@@ -61,7 +61,13 @@ class KubeCluster(Cluster):
 
     # --- exec (the hottest operation) ---------------------------------
     def _exec_stream(
-        self, pod: str, container: str, namespace: str, cmd: tuple[str, ...]
+        self,
+        pod: str,
+        container: str,
+        namespace: str,
+        cmd: tuple[str, ...],
+        *,
+        retry_delay: float = 2.0,
     ) -> dict[str, Any]:
         """One exec via the client's stream, rc/stdout/stderr as
         first-class values.
@@ -113,27 +119,58 @@ class KubeCluster(Cluster):
             reason = str(getattr(e, "reason", "") or e)
             return "Handshake status 4" in reason[:24]
 
-        return retry_transient(_once, no_retry=_permanent)
+        return retry_transient(_once, no_retry=_permanent, delay=retry_delay)
 
     def exec(
-        self, pod: str, container: str, namespace: str, *cmd: str, check: bool = True
+        self,
+        pod: str,
+        container: str,
+        namespace: str,
+        *cmd: str,
+        check: bool = True,
+        retry_delay: float = 2.0,
     ) -> str:
         """Exec into a container; stdout returned. check=True raises
         CommandError on a non-zero rc (the rc is first-class — no
-        argv plumbing)."""
-        result = self._exec_stream(pod, container, namespace, cmd)
+        argv plumbing). retry_delay: the transient-retry backoff —
+        tests inject 0 (the production default is the API-blip
+        contract's 2s)."""
+        result = self._exec_stream(
+            pod, container, namespace, cmd, retry_delay=retry_delay
+        )
         if check and result["rc"] != 0:
             raise CommandError(f"exec rc {result['rc']}: {' '.join(cmd)}")
         return result["stdout"]
 
-    def exec_ok(self, pod: str, container: str, namespace: str, *cmd: str) -> bool:
+    def exec_ok(
+        self,
+        pod: str,
+        container: str,
+        namespace: str,
+        *cmd: str,
+        retry_delay: float = 2.0,
+    ) -> bool:
         """True iff the exec exits 0."""
-        return self._exec_stream(pod, container, namespace, cmd)["rc"] == 0
+        return (
+            self._exec_stream(pod, container, namespace, cmd, retry_delay=retry_delay)[
+                "rc"
+            ]
+            == 0
+        )
 
-    def exec_rc(self, pod: str, container: str, namespace: str, *cmd: str) -> int:
+    def exec_rc(
+        self,
+        pod: str,
+        container: str,
+        namespace: str,
+        *cmd: str,
+        retry_delay: float = 2.0,
+    ) -> int:
         """The exit code (the probe contract: rc 1 = PASS, 0/2/3 =
         failure modes — only rc 1 passes)."""
-        return self._exec_stream(pod, container, namespace, cmd)["rc"]
+        return self._exec_stream(
+            pod, container, namespace, cmd, retry_delay=retry_delay
+        )["rc"]
 
     # --- gets (typed, no parse) -----------------------------------------
     def pods(self, namespace: str) -> list[dict]:

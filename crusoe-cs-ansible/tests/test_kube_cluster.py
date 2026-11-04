@@ -267,7 +267,7 @@ class TestKubeClusterExec:
             return call(*args, **kwargs)
 
         fake_k8s.stream.stream = _flaky_stream  # type: ignore[attr-defined]
-        out = c.exec("p", "c", "ns", "cmd")
+        out = c.exec("p", "c", "ns", "cmd", retry_delay=0)
         assert out == "fake-output"
         assert calls["n"] == 2
 
@@ -275,6 +275,9 @@ class TestKubeClusterExec:
         # After the retries are exhausted the caller gets the
         # foundation's contract: CommandError — never a raw
         # ApiException escaping through exec/exec_ok/exec_rc.
+        # retry_delay=0: the exhaustion path is what's under test,
+        # not the 2s backoff — 3 calls x 3 attempts x 2s of real
+        # sleep was 12s of the suite's runtime.
         from e2e.lib.kube_cluster import KubeCluster
         from e2e.lib.runner import CommandError
 
@@ -285,11 +288,11 @@ class TestKubeClusterExec:
 
         fake_k8s.stream.stream = _always_fails  # type: ignore[attr-defined]
         with pytest.raises(CommandError):
-            c.exec("p", "c", "ns", "cmd")
+            c.exec("p", "c", "ns", "cmd", retry_delay=0)
         with pytest.raises(CommandError):
-            c.exec_rc("p", "c", "ns", "cmd")
+            c.exec_rc("p", "c", "ns", "cmd", retry_delay=0)
         with pytest.raises(CommandError):
-            c.exec_ok("p", "c", "ns", "cmd")
+            c.exec_ok("p", "c", "ns", "cmd", retry_delay=0)
 
     def test_exec_4xx_fast_fails_no_retry(self, fake_k8s):
         # Client errors never heal: a 404 pod retried 3x with 2s

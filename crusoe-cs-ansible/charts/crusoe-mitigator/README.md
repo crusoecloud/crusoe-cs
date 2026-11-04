@@ -138,7 +138,7 @@ ref:
 
 ⚠️ The default digest predates the `cve_2026_98432` role and the
 generic entrypoint — rebuild the image and re-pin from the
-`ansible-image:build` job output before installing with the
+`ansible-image:merge` job output before installing with the
 cve-2026-98432 mitigation enabled.
 
 ## Values

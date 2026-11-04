@@ -8,7 +8,7 @@ plugin) against sibling containers — no SSH, no systemd, no controller image.
 
 - Docker (Colima on arm64 works; all images are multi-arch)
 - Repo `.venv` with `ansible`, `community.docker` collection, and the docker
-  SDK (`pipenv install && pipenv install --dev`, then
+  SDK (`uv sync --dev`, then
   `ansible-galaxy collection install -r requirements.yml`)
 
 ## Usage

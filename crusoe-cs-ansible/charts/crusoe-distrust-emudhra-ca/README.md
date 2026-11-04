@@ -103,7 +103,7 @@ A remediation path for unsupported OSes is out of scope.
 
 - CI builds the image **from the merge commit** (tag = commit SHA) on
   every chart/image change — the bytes that run are the bytes reviewed.
-- The `ansible-image:build` job pushes the multi-arch image to the
+- The `ansible-image:merge` job pushes the multi-arch image to the
   **public** `ghcr.io/crusoecloud/crusoe-cs/ansible` on the default
   branch and prints the pushed digest — update the chart's
   `values.yaml` pin from that output in the same MR flow.

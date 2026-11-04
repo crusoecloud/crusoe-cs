@@ -163,7 +163,7 @@ NixOS): <https://emudhra.we-have-a-problem.com/#workarounds>
 
 | # | Step | Repository README | What it gives you |
 |---|---|---|---|
-| 1 | Install tooling | [Prerequisites → Tooling](../../README.md#tooling) | `pyenv`, `pipenv`, `direnv` |
+| 1 | Install tooling | [Prerequisites → Tooling](../../README.md#tooling) | `uv`, `direnv` |
 | 2 | Install and authenticate the Crusoe CLI | [Prerequisites → Crusoe CLI](../../README.md#crusoe-cli) | The credentials the dynamic inventory queries |
 | 3 | Bootstrap the project | [Setup](../../README.md#setup) | Pinned Python, virtualenv, Ansible + collections |
 | 4 | Understand the inventory | [Inventory](../../README.md#inventory) | How hosts and groups are discovered |

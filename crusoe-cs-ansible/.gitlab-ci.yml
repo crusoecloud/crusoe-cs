@@ -41,15 +41,60 @@ yaml-lint:
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
 
 # ------------------------------------------------------------------
+# Shared CI toolchain: uv from uv.lock — the SAME install method and
+# versions as local dev (bootstrap.sh uses uv). One source of truth
+# for Python versions; no per-job ad-hoc pins to drift (the old
+# hand-pins had already drifted: ansible-core 2.20.6 in CI vs
+# 2.22.0 in the lock).
+#
+# The cache: block persists uv's download + install caches across
+# pipelines (the runners are ephemeral — without it every job
+# re-downloads ~100MiB: the 34.7MiB CPython + ~65MiB of wheels).
+# Keyed by the lock's checksum: a dependency change invalidates the
+# cache exactly when the deps change; the fallback key keeps a warm
+# entry for the previous lock (uv re-downloads only the delta).
+# policy: pull-push — every job reads AND refreshes the cache.
+# ------------------------------------------------------------------
+.uv-toolchain:
+  cache:
+    key:
+      files:
+        - crusoe-cs-ansible/uv.lock
+    paths:
+      # uv's wheel/build cache (downloads + unpacked wheels).
+      - .uv-cache/
+      # uv's managed CPython installs — the repo pins .python-version
+      # (3.14.4) but the slim image ships a different patch, so uv
+      # downloads its own interpreter (~35MiB). Cached here: one-time
+      # cost, exact version parity with local dev.
+      - .uv-python/
+    policy: pull-push
+  variables:
+    # Point uv at the cached dirs (its defaults live in $HOME, which
+    # the runner doesn't persist).
+    UV_CACHE_DIR: "$CI_PROJECT_DIR/.uv-cache"
+    UV_PYTHON_INSTALL_DIR: "$CI_PROJECT_DIR/.uv-python"
+  before_script:
+    # uv is on PyPI — pip install works in the slim image (no curl).
+    - pip install --quiet uv
+    # --locked: fail if uv.lock is out of sync with pyproject.toml —
+    # the drift check is built into the install. --dev: the CI jobs
+    # need the dev toolchain (pytest, ruff, mypy, ansible-lint).
+    - cd crusoe-cs-ansible && uv sync --locked --dev
+    - cd ..
+
+# ------------------------------------------------------------------
 # unit tests
 # ------------------------------------------------------------------
 # Runs the pytest suite (inventory plugin, mitigator entrypoint, netns
-# reconciler). pytest is already in the Pipfile dev packages; install
-# the pinned toolchain so the job matches local runs.
+# reconciler). pytest is in the dev dependency group; install the
+# locked toolchain so the job matches local runs.
 unit_tests:
   stage: validate
   image: python:3.14-slim
-  extends: .rules-mr-and-main
+  extends:
+    - .rules-mr-and-main
+    - .uv-toolchain
   script:
     # helm: the chart-template tests render the chart via `helm template`
     # (skipped with a warning when absent — but CI runs them for real).
@@ -58,7 +103,6 @@ unit_tests:
       python -c "import urllib.request; urllib.request.urlretrieve(
       'https://get.helm.sh/helm-v3.16.4-linux-amd64.tar.gz', '/tmp/helm.tgz')"
     - tar -xzf /tmp/helm.tgz -C /tmp && mv /tmp/linux-amd64/helm /usr/local/bin/helm
-    - pip install --quiet "pytest" "ansible-core==2.20.6" "ruff>=0.8" "mypy" "kubernetes==37.0.1"
     # The three checks, each with ONE canonical config discovered from
     # the repo (pyproject.toml) — no per-tool flags here, so CI and
     # the editors read the same source of truth:
@@ -67,30 +111,36 @@ unit_tests:
     #            adopted repo-wide; Black is no longer used)
     #   mypy   — the type checker ([tool.mypy])
     - cd crusoe-cs-ansible
-    - ruff format --check images/ roles/cve_2026_98432/files/ scripts/ tests/
-    - ruff check --no-fix images/ roles/cve_2026_98432/files/ scripts/ tests/
-    - mypy images/ roles/cve_2026_98432/files/ scripts/ tests/
-    - python -m pytest tests/ -q
+    - uv run ruff format --check images/ roles/cve_2026_98432/files/ scripts/ tests/
+    - uv run ruff check --no-fix images/ roles/cve_2026_98432/files/ scripts/ tests/
+    - uv run mypy images/ roles/cve_2026_98432/files/ scripts/ tests/
+    - uv run python -m pytest tests/ -q
 
 # ------------------------------------------------------------------
 # ansible-lint
 # ------------------------------------------------------------------
 # Enforces Ansible best practices across all playbooks and roles.
-# Uses pipelinecomponents/ansible-lint — ships ansible-lint and its
-# Ansible dependencies pre-installed.
-# A .ansible-lint config file at the repo root controls which rules
-# are enabled/skipped without touching this job definition.
+# DELIBERATELY NOT on the uv toolchain: the lock's combo
+# (ansible-lint 26.10.1 + ansible-core 2.22.0) false-positives on the
+# repo-wide `hosts: "{{ target_hosts | mandatory(...) }}"` pattern —
+# the syntax-check evaluates hosts BEFORE -e vars exist and reports
+# the mandatory() failure as an error. The pinned combo below
+# (26.4.0 / 2.20.6) is proven to tolerate it. Revisit when the
+# pattern is retired or ansible-lint fixes the evaluation order.
 ansible-lint:
   stage: validate
   image: python:3.14-slim
-  extends: .rules-mr-and-main
+  # pip's wheel cache — the pinned ansible-lint/ansible-core wheels
+  # (~15MiB) persist across pipelines instead of re-downloading.
+  # Keyed by the job's own pin string: changes when the pins change.
+  cache:
+    key: "ansible-lint-26.4.0_2.20.6"
+    paths:
+      - .pip-cache/
+    policy: pull-push
+  variables:
+    PIP_CACHE_DIR: "$CI_PROJECT_DIR/.pip-cache"
   script:
-    # Install the repo's OWN pinned toolchain (Pipfile.lock): the
-    # floating pipelinecomponents image carries an ansible-lint/ansible-
-    # core combo whose syntax-check errors on the playbooks'
-    # mandatory()-in-hosts pattern (a false positive the repo's pinned
-    # versions tolerate). cd into the component: its .ansible-lint and
-    # ansible.cfg (roles_path etc.) live there.
     - pip install --quiet "ansible-lint==26.4.0" "ansible-core==2.20.6"
     # ANSIBLE_CONFIG bypasses ansible's world-writable-dir check (the
     # checkout dir is 0777 in CI, so ansible.cfg would be ignored and
@@ -99,3 +149,46 @@ ansible-lint:
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+# ------------------------------------------------------------------
+# uv.lock drift check
+# ------------------------------------------------------------------
+# The image installs Python deps from uv.lock pins, so a stale lock
+# means a stale image. `uv lock --check` is the built-in detector: it
+# fails when the committed lock no longer matches pyproject.toml's
+# resolution — the fix is `uv lock` and committing the result (which
+# triggers the image build via the changes rules). Runs in MR and
+# branch pipelines that touch the manifest or lock, so a hand-edited
+# or stale lock is caught before merge.
+uv-lock-drift:
+  stage: validate
+  image: python:3.14-slim
+  # Same uv cache as .uv-toolchain: `uv lock --check` re-resolves
+  # against PyPI metadata — the cached index responses make the
+  # check near-instant on repeat runs.
+  cache:
+    key:
+      files:
+        - crusoe-cs-ansible/uv.lock
+    paths:
+      - .uv-cache/
+      - .uv-python/
+    policy: pull-push
+  variables:
+    UV_CACHE_DIR: "$CI_PROJECT_DIR/.uv-cache"
+    UV_PYTHON_INSTALL_DIR: "$CI_PROJECT_DIR/.uv-python"
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      changes:
+        - crusoe-cs-ansible/pyproject.toml
+        - crusoe-cs-ansible/uv.lock
+    - if: '$CI_COMMIT_BRANCH'
+      changes:
+        - crusoe-cs-ansible/pyproject.toml
+        - crusoe-cs-ansible/uv.lock
+  script:
+    - pip install --quiet uv
+    - cd crusoe-cs-ansible
+    # --check: verify the lock is up to date; exit 1 if not. No
+    # mutation, no git dependency.
+    - uv lock --check

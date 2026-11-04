@@ -1,9 +1,22 @@
 # ============================================================
 # crusoe-cs-ansible — Container image build & publish
 # ============================================================
-# Builds the component's image once (multi-arch) and pushes to two
-# registries with different policies:
+# Builds the component's image NATIVELY per architecture (amd64 on
+# the x86 fleet, arm64 on the arm64 fleet — no QEMU emulation), the
+# two builds in PARALLEL, then merges the single-arch images into
+# one multi-arch image. Per-arch registry build caches make warm
+# builds layer-cache hits.
 #
+# Why three jobs instead of one multi-arch build: a single
+# `--platform linux/amd64,linux/arm64` build on an x86 runner
+# emulates arm64 under QEMU — measured ~10x slower per layer (pip
+# install: 222s emulated vs 22s native), and the arm64 half dominated
+# the whole job (~350s of ~400s). Native per-arch jobs run in
+# parallel on matching fleets (the arm64 fleet is near-idle), and
+# `imagetools create` assembles the multi-arch manifest list from
+# the per-arch images without rebuilding anything.
+#
+# Publishing (two registries, different policies):
 #   1. GitLab project registry ($CI_REGISTRY_IMAGE/crusoe-cs-ansible)
 #      — pushed on EVERY pipeline (MR + branches + main), authenticated
 #      with the CI job token. This is the branch-level artifact used
@@ -12,6 +25,9 @@
 #   2. ghcr.io/crusoecloud/crusoe-cs/ansible — pushed ONLY on the
 #      default branch, PAT auth via protected CI/CD variables
 #      GHCR_USERNAME / GHCR_TOKEN. Publishing policy is main-only.
+#      On main each per-arch build tags BOTH registries (registries
+#      reject manifest lists referencing manifests they don't hold),
+#      and the merge job assembles the manifest list in each registry.
 #
 # Requires protected CI/CD variables (main-branch publish only):
 #   GHCR_USERNAME — GitHub username owning the PAT
@@ -32,11 +48,42 @@
 # in the system CA bundle or python certifi, or if the advisory's canary
 # sites still verify. The trust e2e re-proves the pushed artifact (see
 # tests/e2e/ansible-image/).
-ansible-image:build:
+#
+# NOTE: the trust e2e (tests/e2e/ansible-image/trust_check.py) is
+# NOT run in CI — its meaningful checks (live TLS) need egress the
+# runner doesn't have, and the fingerprint scans it would run are
+# already covered by the Dockerfile's build-time trust gate. Run it
+# locally where egress exists.
+
+# Shared build machinery for the per-arch build jobs: dind + buildx +
+# registry logins + the change-driven rules. The merge job is
+# standalone — `imagetools` is a registry-API client, no docker daemon.
+#
+# needs: [] — the builds start at pipeline start, CONCURRENT with the
+# validate stage, instead of waiting for it. The image build has no
+# dependency on the validate jobs (different inputs); the old
+# stage-ordering serialized ~70s of validation ahead of every build.
+# Tradeoff: a build may push its per-arch tag to the GitLab registry
+# even if a validate job later fails — acceptable: the tag is an
+# ephemeral branch artifact, a failed validate job still blocks the
+# MR, and the main-only GHCR publish (merge job) can never run on a
+# red pipeline.
+.ansible-image:build:
   stage: build
-  image: docker:27
+  needs: []
+  # pull_policy if-not-present: the fleet's default (Always) re-pulls
+  # docker:27 + docker:27-dind on EVERY job — on a cold arm64 node
+  # that was 205s of dind image pull + daemon boot before the build
+  # even started (measured: job 17746466192, 282s of 322s was
+  # infra startup). if-not-present uses the node's cached image when
+  # it exists; the digest-pinned base in the Dockerfile keeps the
+  # BUILD reproducible regardless of the runner image's age.
+  image:
+    name: docker:27
+    pull_policy: if-not-present
   services:
-    - docker:27-dind
+    - name: docker:27-dind
+      pull_policy: if-not-present
   variables:
     DOCKER_HOST: tcp://docker:2375
     DOCKER_TLS_CERTDIR: ""
@@ -45,6 +92,11 @@ ansible-image:build:
     # GitLab project registry — job-token auth, pushed on every pipeline
     # so MR images are testable without touching the main-only GHCR path.
     GL_REGISTRY_IMAGE: "${CI_REGISTRY_IMAGE}/crusoe-cs-ansible"
+    # Per-arch tags must stay plain image manifests so the merge job
+    # assembles a clean manifest list — suppress buildx's default
+    # provenance/SBOM attestations (they wrap each tag in an image
+    # index, which would nest inside the merged list).
+    BUILDX_NO_DEFAULT_ATTESTATIONS: "1"
   before_script:
     - until docker info > /dev/null 2>&1; do sleep 1; done
     # GitLab project registry: always available via the CI job token.
@@ -59,45 +111,6 @@ ansible-image:build:
         echo "GHCR_USERNAME/GHCR_TOKEN not set — skipping GHCR push"
       fi
     - docker buildx create --use --name multiarch-ansible --driver docker-container
-  script:
-    # Build once, multi-arch, and push to the GitLab project registry on
-    # every pipeline (MR + branches + main). The MR-pipeline image is the
-    # branch-level artifact: copy it to the Crusoe registry for cluster
-    # validation (see docs/runbooks/cve-2026-98432-rollout.md Stage 0).
-    - |
-      docker buildx build \
-        --platform linux/amd64,linux/arm64 \
-        --push \
-        --tag ${GL_REGISTRY_IMAGE}:${CI_COMMIT_SHORT_SHA} \
-        --tag ${GL_REGISTRY_IMAGE}:${CI_COMMIT_REF_SLUG} \
-        -f crusoe-cs-ansible/images/ansible/Dockerfile \
-        crusoe-cs-ansible
-      echo "GITLAB REGISTRY IMAGE (branch validation):"
-      docker buildx imagetools inspect "${GL_REGISTRY_IMAGE}:${CI_COMMIT_SHORT_SHA}" \
-        | grep -E '^\s+Digest:' || true
-    # GHCR publish: main branch only, and only when credentials exist.
-    - |
-      if [ "$CI_COMMIT_BRANCH" = "$CI_DEFAULT_BRANCH" ] && [ -n "$GHCR_USERNAME" ] && [ -n "$GHCR_TOKEN" ]; then
-        docker buildx build \
-          --platform linux/amd64,linux/arm64 \
-          --push \
-          --tag ${CONTROLLER_IMAGE}:${CI_COMMIT_SHORT_SHA} \
-          --tag ${CONTROLLER_IMAGE}:latest \
-          -f crusoe-cs-ansible/images/ansible/Dockerfile \
-          crusoe-cs-ansible
-        # Print the pushed digest: the chart's default image pin
-        # (values.yaml) is updated from this line after each publish.
-        echo "PUSHED DIGEST (pin this in charts/crusoe-mitigator/values.yaml):"
-        docker buildx imagetools inspect "${CONTROLLER_IMAGE}:${CI_COMMIT_SHORT_SHA}" \
-          | grep -E '^\s+Digest:' || true
-      else
-        echo "GHCR push skipped (main-only policy / credentials not set)"
-      fi
-    # NOTE: the trust e2e (tests/e2e/ansible-image/trust_check.py) is
-    # NOT run in CI — its meaningful checks (live TLS) need egress the
-    # runner doesn't have, and the fingerprint scans it would run are
-    # already covered by the Dockerfile's build-time trust gate. Run it
-    # locally where egress exists.
   rules:
     # Run on MR pipelines when the image contents change — the GitLab
     # registry push gives a testable branch artifact.
@@ -108,6 +121,7 @@ ansible-image:build:
         - crusoe-cs-ansible/playbooks/**/*
         - crusoe-cs-ansible/plugins/**/*
         - crusoe-cs-ansible/requirements.yml
+        - crusoe-cs-ansible/uv.lock
     - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
       changes:
         - crusoe-cs-ansible/images/ansible/**/*
@@ -115,6 +129,7 @@ ansible-image:build:
         - crusoe-cs-ansible/playbooks/**/*
         - crusoe-cs-ansible/plugins/**/*
         - crusoe-cs-ansible/requirements.yml
+        - crusoe-cs-ansible/uv.lock
     # Branch pipelines (non-MR) with image changes: still push to the
     # GitLab registry so branch work is testable before an MR exists.
     - if: '$CI_COMMIT_BRANCH'
@@ -124,3 +139,163 @@ ansible-image:build:
         - crusoe-cs-ansible/playbooks/**/*
         - crusoe-cs-ansible/plugins/**/*
         - crusoe-cs-ansible/requirements.yml
+        - crusoe-cs-ansible/uv.lock
+
+# Native amd64 build. Untagged on purpose: untagged jobs land on the
+# x86 fleet (the arm64 fleet only accepts its own tags) — same runner
+# assignment as before this split.
+ansible-image:build-amd64:
+  extends: .ansible-image:build
+  script:
+    # Tag args: GitLab registry always; GHCR per-arch tag on main so the
+    # merge job can assemble GHCR's manifest list from GHCR-hosted
+    # per-arch images.
+    # Registry cache is per-arch: an amd64 cache is useless to an arm64
+    # build (different layer digests), so each arch keeps its own ref.
+    # mode=max caches ALL intermediate layers — a warm build with an
+    # unchanged Dockerfile reuses everything, trust gate included.
+    # Cache policy (review finding: any branch pipeline's job token
+    # can WRITE the project registry, so cache entries are untrusted
+    # input — main must never READ them, or unmerged code could feed
+    # layers to the GHCR publish without the steps re-running (trust
+    # gate included), breaking "the bytes that run are the bytes
+    # reviewed").
+    #   main:  NEVER --cache-from (always a full cold rebuild from
+    #           reviewed source — the published image provably
+    #           contains only reviewed bytes); KEEPS --cache-to so
+    #           its trusted layers warm every other build.
+    #   MR/branch: read + write the shared cache — warm iteration.
+    #           Their writes can never reach main's publish path.
+    # No GHCR, no extra infrastructure: the guarantee comes from
+    # main not reading, not from write enforcement.
+    - >
+      TAGS="--tag ${GL_REGISTRY_IMAGE}:${CI_COMMIT_SHORT_SHA}-amd64";
+      CACHE_FROM="--cache-from type=registry,ref=${GL_REGISTRY_IMAGE}:buildcache-amd64";
+      CACHE_TO="--cache-to type=registry,ref=${GL_REGISTRY_IMAGE}:buildcache-amd64,mode=max";
+      if [ "$CI_COMMIT_BRANCH" = "$CI_DEFAULT_BRANCH" ]; then
+        CACHE_FROM="";
+        if [ -n "$GHCR_USERNAME" ] && [ -n "$GHCR_TOKEN" ]; then
+          TAGS="$TAGS --tag ${CONTROLLER_IMAGE}:${CI_COMMIT_SHORT_SHA}-amd64";
+        fi;
+      fi;
+      docker buildx build
+      --platform linux/amd64
+      $CACHE_FROM
+      $CACHE_TO
+      $TAGS
+      --push
+      -f crusoe-cs-ansible/images/ansible/Dockerfile
+      crusoe-cs-ansible
+
+# Native arm64 build on the arm64 fleet — the job that removes QEMU
+# emulation from the critical path.
+ansible-image:build-arm64:
+  extends: .ansible-image:build
+  tags: [arm64_gcp]
+  script:
+    # Same cache policy as build-amd64: main never reads cache (full
+    # cold rebuild — only reviewed bytes reach the publish path) but
+    # writes it; MR/branch pipelines read + write for warm iteration.
+    - >
+      TAGS="--tag ${GL_REGISTRY_IMAGE}:${CI_COMMIT_SHORT_SHA}-arm64";
+      CACHE_FROM="--cache-from type=registry,ref=${GL_REGISTRY_IMAGE}:buildcache-arm64";
+      CACHE_TO="--cache-to type=registry,ref=${GL_REGISTRY_IMAGE}:buildcache-arm64,mode=max";
+      if [ "$CI_COMMIT_BRANCH" = "$CI_DEFAULT_BRANCH" ]; then
+        CACHE_FROM="";
+        if [ -n "$GHCR_USERNAME" ] && [ -n "$GHCR_TOKEN" ]; then
+          TAGS="$TAGS --tag ${CONTROLLER_IMAGE}:${CI_COMMIT_SHORT_SHA}-arm64";
+        fi;
+      fi;
+      docker buildx build
+      --platform linux/arm64
+      $CACHE_FROM
+      $CACHE_TO
+      $TAGS
+      --push
+      -f crusoe-cs-ansible/images/ansible/Dockerfile
+      crusoe-cs-ansible
+
+# Merge the per-arch images into one multi-arch image and publish to
+# both registries. `imagetools create` assembles the manifest list
+# from the per-arch tags — a registry-side operation, no rebuild. On
+# main this is also the GHCR publish point: ONE build per arch,
+# tagged for both registries, replaces the old second full
+# multi-arch rebuild for GHCR.
+ansible-image:merge:
+  stage: build
+  image: docker:27
+  needs:
+    - job: ansible-image:build-amd64
+    - job: ansible-image:build-arm64
+  variables:
+    CONTROLLER_IMAGE: "ghcr.io/crusoecloud/crusoe-cs/ansible"
+    GL_REGISTRY_IMAGE: "${CI_REGISTRY_IMAGE}/crusoe-cs-ansible"
+  before_script:
+    # GitLab registry: job-token auth (read the per-arch images, push
+    # the merged manifest list).
+    - echo "$CI_JOB_TOKEN" | docker login -u gitlab-ci-token --password-stdin "$CI_REGISTRY"
+    # GHCR: only needed on main; log in when the credentials exist.
+    - |
+      if [ -n "$GHCR_USERNAME" ] && [ -n "$GHCR_TOKEN" ]; then
+        echo "$GHCR_TOKEN" | docker login -u "$GHCR_USERNAME" --password-stdin ghcr.io
+      else
+        echo "GHCR_USERNAME/GHCR_TOKEN not set — skipping GHCR push"
+      fi
+  script:
+    # Multi-arch image in the GitLab project registry (every pipeline):
+    # the branch-level artifact for cluster validation (see
+    # docs/runbooks/cve-2026-98432-rollout.md Stage 0).
+    - >
+      docker buildx imagetools create
+      --tag ${GL_REGISTRY_IMAGE}:${CI_COMMIT_SHORT_SHA}
+      --tag ${GL_REGISTRY_IMAGE}:${CI_COMMIT_REF_SLUG}
+      ${GL_REGISTRY_IMAGE}:${CI_COMMIT_SHORT_SHA}-amd64
+      ${GL_REGISTRY_IMAGE}:${CI_COMMIT_SHORT_SHA}-arm64
+    - echo "GITLAB REGISTRY IMAGE (branch validation):"
+    - docker buildx imagetools inspect "${GL_REGISTRY_IMAGE}:${CI_COMMIT_SHORT_SHA}" | grep -E '^Digest:' || true
+    # GHCR publish: main branch only, and only when credentials exist.
+    # The manifest list is assembled from GHCR-hosted per-arch images
+    # (pushed by the build jobs) — no rebuild.
+    - |
+      if [ "$CI_COMMIT_BRANCH" = "$CI_DEFAULT_BRANCH" ] && [ -n "$GHCR_USERNAME" ] && [ -n "$GHCR_TOKEN" ]; then
+        docker buildx imagetools create \
+          --tag ${CONTROLLER_IMAGE}:${CI_COMMIT_SHORT_SHA} \
+          --tag ${CONTROLLER_IMAGE}:latest \
+          ${CONTROLLER_IMAGE}:${CI_COMMIT_SHORT_SHA}-amd64 \
+          ${CONTROLLER_IMAGE}:${CI_COMMIT_SHORT_SHA}-arm64
+        # Print the pushed digest: the chart's default image pin
+        # (values.yaml) is updated from this line after each publish.
+        echo "PUSHED DIGEST (pin this in charts/crusoe-mitigator/values.yaml):"
+        docker buildx imagetools inspect "${CONTROLLER_IMAGE}:${CI_COMMIT_SHORT_SHA}" \
+          | grep -E '^Digest:' || true
+      else
+        echo "GHCR push skipped (main-only policy / credentials not set)"
+      fi
+  rules:
+    # MUST stay in sync with .ansible-image:build's rules — the merge
+    # job runs in exactly the pipelines the builds run in (needs:
+    # enforces that both builds exist in the pipeline).
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      changes:
+        - crusoe-cs-ansible/images/ansible/**/*
+        - crusoe-cs-ansible/roles/**/*
+        - crusoe-cs-ansible/playbooks/**/*
+        - crusoe-cs-ansible/plugins/**/*
+        - crusoe-cs-ansible/requirements.yml
+        - crusoe-cs-ansible/uv.lock
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+      changes:
+        - crusoe-cs-ansible/images/ansible/**/*
+        - crusoe-cs-ansible/roles/**/*
+        - crusoe-cs-ansible/playbooks/**/*
+        - crusoe-cs-ansible/plugins/**/*
+        - crusoe-cs-ansible/requirements.yml
+        - crusoe-cs-ansible/uv.lock
+    - if: '$CI_COMMIT_BRANCH'
+      changes:
+        - crusoe-cs-ansible/images/ansible/**/*
+        - crusoe-cs-ansible/roles/**/*
+        - crusoe-cs-ansible/playbooks/**/*
+        - crusoe-cs-ansible/plugins/**/*
+        - crusoe-cs-ansible/requirements.yml
+        - crusoe-cs-ansible/uv.lock
