@@ -366,6 +366,20 @@
   register: cve_2026_98432_unit_file
   when: cve_2026_98432_host_etc_writable.stdout == 'yes'
 
+- name: Check the wants symlink (idempotence probe)
+  # rc 0 = the link is ABSENT (test ! -L succeeds); rc 1 = present.
+  # The enable task's changed_when reads this — a command task always
+  # reports changed otherwise, breaking the idempotent scenarios.
+  ansible.builtin.command:
+    cmd: >-
+      sh -c 'test ! -L {{ '/host' if cve_2026_98432_pod_native | bool else '' }}/etc/systemd/system/multi-user.target.wants/{{ cve_2026_98432_unit }}'
+  register: cve_2026_98432_wants_link_absent
+  failed_when: false
+  changed_when: false
+  when: >-
+    cve_2026_98432_pod_native | bool
+    and cve_2026_98432_host_etc_writable.stdout == 'yes'
+
 - name: Enable the boot unit (pod-native symlink fallback)
   # The systemd task below drives enablement where systemctl exists
   # (SSH/chroot targets). Pod-native (the chart default) runs in the
@@ -378,13 +392,25 @@
   # create it directly. The TARGET is host-absolute (the HOST's
   # systemd resolves it — /host does not exist on the host); the
   # symlink itself is created through the pod's /host mount.
-  # Idempotent: file state=link is a no-op when the link already
-  # points at the unit.
-  ansible.builtin.file:
-    src: /etc/systemd/system/{{ cve_2026_98432_unit }}
-    dest: "{{ '/host' if cve_2026_98432_pod_native | bool else '' }}/etc/systemd/system/multi-user.target.wants/{{ cve_2026_98432_unit }}"
-    state: link
-    force: true
+  # NB: ln -sf, NOT file state=link — the file module VALIDATES the
+  # src exists, and the host-absolute target does not exist inside
+  # the pod (the unit lives at /host/etc/... there): state=link
+  # fails with "Error while linking" on every pod-native run with a
+  # writable host /etc (found live in the e2e port). ln -sf creates
+  # the dangling-by-design link idempotently. The mkdir -p first:
+  # multi-user.target.wants does not exist on a fresh host /etc
+  # (systemd creates it on real hosts; the pod's /host may be a
+  # bare directory — found live on the alpine e2e target).
+  ansible.builtin.command:
+    cmd: >-
+      sh -c 'mkdir -p {{ '/host' if cve_2026_98432_pod_native | bool else '' }}/etc/systemd/system/multi-user.target.wants &&
+      ln -sf /etc/systemd/system/{{ cve_2026_98432_unit }}
+      {{ '/host' if cve_2026_98432_pod_native | bool else '' }}/etc/systemd/system/multi-user.target.wants/{{ cve_2026_98432_unit }}'
+  # command tasks ALWAYS report changed — without changed_when,
+  # every pod-native run reads as changed and the idempotent
+  # scenarios fail (found by review). Changed only when the link was
+  # absent (the check task above).
+  changed_when: cve_2026_98432_wants_link_absent.rc | default(1) == 0
   when: >-
     cve_2026_98432_pod_native | bool
     and cve_2026_98432_host_etc_writable.stdout == 'yes'

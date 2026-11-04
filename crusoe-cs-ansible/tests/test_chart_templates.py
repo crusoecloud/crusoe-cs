@@ -12,8 +12,9 @@ import subprocess
 
 import pytest
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-CHART = os.path.join(HERE, "..", "charts", "crusoe-mitigator")
+from conftest import COMPONENT_ROOT
+
+CHART = COMPONENT_ROOT / "charts" / "crusoe-mitigator"
 
 # The chart tests render via `helm template`; when helm is absent
 # (minimal environments) they SKIP with a clear reason rather than
@@ -331,7 +332,7 @@ def test_mitigations_line_parses_through_the_entrypoint():
     line = match.group(0)
     spec = importlib.util.spec_from_file_location(
         "mitigate",
-        os.path.join(HERE, "..", "images", "ansible", "mitigate.py"),
+        str(COMPONENT_ROOT / "images" / "ansible" / "mitigate.py"),
     )
     assert spec and spec.loader, "mitigate.py not found"
     mod = importlib.util.module_from_spec(spec)
@@ -358,7 +359,7 @@ def test_emudhra_run_wires_capture_output():
 
     spec = importlib.util.spec_from_file_location(
         "chart_smoke",
-        os.path.join(HERE, "..", "tests", "e2e", "emudhra-ca", "chart-smoke.py"),
+        str(COMPONENT_ROOT / "tests" / "e2e" / "emudhra-ca" / "chart-smoke.py"),
     )
     assert spec and spec.loader, "chart-smoke.py not found"
     mod = importlib.util.module_from_spec(spec)

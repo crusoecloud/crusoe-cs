@@ -58,7 +58,7 @@ unit_tests:
       python -c "import urllib.request; urllib.request.urlretrieve(
       'https://get.helm.sh/helm-v3.16.4-linux-amd64.tar.gz', '/tmp/helm.tgz')"
     - tar -xzf /tmp/helm.tgz -C /tmp && mv /tmp/linux-amd64/helm /usr/local/bin/helm
-    - pip install --quiet "pytest" "ansible-core==2.20.6" "ruff>=0.8" "mypy"
+    - pip install --quiet "pytest" "ansible-core==2.20.6" "ruff>=0.8" "mypy" "kubernetes==37.0.1"
     # The three checks, each with ONE canonical config discovered from
     # the repo (pyproject.toml) — no per-tool flags here, so CI and
     # the editors read the same source of truth:

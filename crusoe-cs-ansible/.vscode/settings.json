@@ -42,6 +42,6 @@
     }
   },
   "flake8.args": [
-    "--extend-ignore=E501,F841,E203"
+    "--extend-ignore=E501,F841,E203,E402"
   ]
 }

@@ -6,12 +6,12 @@ scheduler's due-time arithmetic without running ansible-playbook.
 
 import importlib.util
 import json
-import os
 
 import pytest
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-MITIGATE = os.path.join(HERE, "..", "images", "ansible", "mitigate.py")
+from conftest import COMPONENT_ROOT
+
+MITIGATE = COMPONENT_ROOT / "images" / "ansible" / "mitigate.py"
 
 
 @pytest.fixture()

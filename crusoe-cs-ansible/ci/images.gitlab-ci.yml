@@ -93,7 +93,7 @@ ansible-image:build:
       else
         echo "GHCR push skipped (main-only policy / credentials not set)"
       fi
-    # NOTE: the trust e2e (tests/e2e/ansible-image/test_trust.py) is
+    # NOTE: the trust e2e (tests/e2e/ansible-image/trust_check.py) is
     # NOT run in CI — its meaningful checks (live TLS) need egress the
     # runner doesn't have, and the fingerprint scans it would run are
     # already covered by the Dockerfile's build-time trust gate. Run it

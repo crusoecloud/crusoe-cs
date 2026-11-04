@@ -31,7 +31,13 @@ ignore = ["E501"]
 
 [tool.ruff.lint.isort]
 # Match the existing import style (stdlib, then third-party).
-known-first-party = []
+known-first-party = ["e2e"]
+
+[tool.pytest.ini_options]
+# The test runner's path: tests/ is importable as a package root, so
+# the unit tests import the e2e foundation WITHOUT sys.path surgery
+# (from e2e.lib import ...). pytest >= 7.
+pythonpath = ["."]
 
 [tool.mypy]
 # The type checker (CI: `mypy`). The codebase is unannotated; this
@@ -41,3 +47,5 @@ ignore_missing_imports = true
 # The reconciler ships in the alpine image (python3 stdlib only) —
 # keep it import-light.
 warn_unused_ignores = false
+# Same package root as pytest: e2e.lib resolves from the repo root.
+mypy_path = "crusoe-cs-ansible"

@@ -20,7 +20,7 @@ artifact and adds the functional HTTPS assertions the build gate can't do
 offline.
 
 Usage:
-    tests/e2e/ansible-image/test_trust.py [--image IMAGE]
+    tests/e2e/ansible-image/trust_check.py [--image IMAGE]
 
 Environment:
     CONTROLLER_IMAGE  image to test (default ghcr.io/crusoecloud/crusoe-cs/ansible:latest)

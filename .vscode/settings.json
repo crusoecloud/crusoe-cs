@@ -11,7 +11,7 @@
   "mypy-type-checker.args": [],
   "mypy-type-checker.preferDaemon": false,
   "flake8.args": [
-    "--extend-ignore=E501,F841,E203"
+    "--extend-ignore=E501,F841,E203,E402"
   ],
   "flake8.severity": {
     "E501": "Hint",
