@@ -71,8 +71,7 @@
   # templates set_fact args BEFORE evaluating `when`, so an unguarded
   # `.content` on a FAILED slurp (the state file is absent) crashes
   # with AttributeError before the fail-loudly task above can produce
-  # its clear message (found live: the documented SSH usage on a VM
-  # without k8s died cryptically).
+  # its clear message.
   ansible.builtin.set_fact:
     cve_2026_98432_resolved_mode: >-
       {{ cve_2026_98432_last_mode_raw.content | b64decode | trim
@@ -133,8 +132,7 @@
   # The persist below runs BEFORE the nftables config dir-create task
   # further down. Stock Ubuntu ships only /etc/nftables.conf (no
   # /etc/nftables/ dir), so a fresh node failed here with "Destination
-  # directory does not exist" and the rule never loaded (found live,
-  # CMK Ubuntu 22.04). mkdir -p semantics: idempotent.
+  # directory does not exist" and the rule never loaded. mkdir -p semantics: idempotent.
   ansible.builtin.file:
     path: "{{ cve_2026_98432_mode_state_path | dirname }}"
     state: directory
@@ -250,6 +248,45 @@
   changed_when: false
   failed_when: false
 
+- name: Compute the loaded-verdict fact
+  # THE single source of truth for what the loaded table says:
+  #   'enforce' — a drop rule is loaded
+  #   'observe' — a log rule is loaded
+  #   'absent'  — no table (the self-heal branch)
+  # Every downstream condition (the guard-skip fact, the mode-flip
+  # fact, the downgrade refusal/report) DERIVES from this fact — the
+  # raw loaded_chain string comparison lives HERE and nowhere else
+  # (a copy-pasted comparison drifts; the counter-reset bug survived
+  # exactly that way). An unreadable verdict (the chain read failed)
+  # resolves 'absent' — the unreadable-verdict guard below fails the
+  # run before any load can act on it.
+  ansible.builtin.set_fact:
+    cve_2026_98432_loaded_verdict: >-
+      {{ 'absent'
+         if cve_2026_98432_table_check.rc != 0
+            or cve_2026_98432_loaded_chain.rc != 0
+            or not (cve_2026_98432_loaded_chain.stdout
+                    | regex_search('(?m)^.*hdrlength != 5.*(drop|log prefix).*$'))
+         else ('enforce'
+               if 'drop' in cve_2026_98432_loaded_chain.stdout
+               else 'observe') }}
+  # The presence check makes the verdict require OUR VERDICT RULE —
+  # a LINE carrying both our match expression and a verdict token
+  # (drop | log prefix):
+  # (1) a FLUSHED chain (table + chain exist, rules gone) must read
+  #     'absent' — the else-branch default would be a LIE for an
+  #     empty chain (no rules = no protection = absent = self-heal).
+  # (2) a chain holding ONLY the loopback count-only rule must also
+  #     read 'absent' — the loopback rule carries the same match
+  #     expression but NO verdict token, and a chain that lost its
+  #     verdict rule is unprotected (the review's finding: the bare
+  #     substring check was satisfied by the loopback rule).
+  # (3) a TAMPERED table containing the bare word 'drop' (e.g. in a
+  #     comment or an unrelated rule) must not read 'enforce'. (Root
+  #     can still defeat any userspace check — delete the table,
+  #     which the gate catches — but the false-verdict window for
+  #     crafted listings is closed.)
+
 - name: Compute the guard-skip fact
   # Single source of truth for "another release owns this node with an
   # enforce table; this observe run must not touch it" — every
@@ -258,10 +295,71 @@
   # forget.
   ansible.builtin.set_fact:
     cve_2026_98432_guard_skip: >-
-      {{ (cve_2026_98432_table_check.rc == 0
-          and 'drop' in cve_2026_98432_loaded_chain.stdout
+      {{ (cve_2026_98432_loaded_verdict == 'enforce'
           and cve_2026_98432_resolved_mode == 'observe'
           and not (cve_2026_98432_allow_mode_downgrade | bool)) | bool }}
+
+- name: Compute the mode-flip fact
+  # Single source of truth for "the loaded verdict differs from the
+  # resolved mode" — the flip detection both load paths key off (the
+  # systemd task's restart decision, the direct load's when) instead
+  # of a copy-pasted verdict comparison. Only meaningful when the
+  # table IS loaded; a missing table is the self-heal branch.
+  ansible.builtin.set_fact:
+    cve_2026_98432_mode_flipped: >-
+      {{ (cve_2026_98432_loaded_verdict != 'absent'
+          and cve_2026_98432_loaded_verdict != cve_2026_98432_resolved_mode) | bool }}
+
+- name: Compute the unreadable-verdict fact
+  # The table EXISTS (the table read succeeded, so nft works) but its
+  # chain cannot be read. The verdict is UNKNOWN — not 'absent'.
+  #
+  # This matters because every enforce->observe protection keys off
+  # loaded_verdict == 'enforce'. A transient read failure (netlink
+  # EBUSY, a dump interrupted by the reconciler, an OOM-killed nft)
+  # would otherwise resolve 'absent', and an OBSERVE run would render
+  # and load the observe ruleset over a live ENFORCE table — a silent
+  # downgrade.
+  #
+  # A MISSING chain is not unreadable: nft's error is exactly "No such
+  # file or directory", and loading over a missing chain cannot
+  # downgrade anything (there is no rule to downgrade). The guard
+  # would otherwise fail every observe run on a chain someone deleted
+  # — the node stayed unprotected (the review's finding).
+  ansible.builtin.set_fact:
+    cve_2026_98432_verdict_unreadable: >-
+      {{ (cve_2026_98432_table_check.rc == 0
+          and cve_2026_98432_loaded_chain.rc != 0
+          and 'No such file or directory'
+              not in cve_2026_98432_loaded_chain.stderr) | bool }}
+
+- name: Compute the table-state action
+  # THE single source of truth for what the loaded table demands of
+  # this run — the guard and both load paths read THIS, never the raw
+  # inputs (hand-composing the same condition in each consumer is
+  # how the refuse/heal split broke). A new table-state meaning is
+  # ONE branch HERE — the consumers' vocabulary is stable:
+  #   'heal'   — no protection exists (table, chain, or rules gone)
+  #   'flip'   — the loaded verdict differs from the resolved mode
+  #   'converged' — already right: leave it (the counters survive)
+  # NB: there is no 'refuse'. A successful TABLE read proves nft
+  # works, so a failed CHAIN read means the chain is MISSING — and
+  # loading over a missing chain cannot downgrade anything (there is
+  # no rule to downgrade). If nft is genuinely broken, both reads fail
+  # and the load itself fails loudly.
+  # NB: a future mid-play recompute (a second consumer needing fresh
+  # state) extracts this chain — read → verdict → flip → action —
+  # into tasks/table-state.yml and re-imports it; the ordering pins
+  # hold under import_tasks (parse-time flatten). Not done now: one
+  # caller, and the run IS the atomic unit (one read of the world,
+  # one decision, one action).
+  ansible.builtin.set_fact:
+    cve_2026_98432_table_action: >-
+      {{ 'heal'
+         if cve_2026_98432_loaded_verdict == 'absent'
+         else ('flip'
+               if cve_2026_98432_mode_flipped | bool
+               else 'converged') }}
 
 - name: Create the nftables config directory
   ansible.builtin.file:
@@ -283,6 +381,26 @@
     mode: "0755"
   when: cve_2026_98432_pod_native | bool
 
+# Fail CLOSED on an unreadable verdict. The table exists but its
+# chain cannot be read, so the loaded mode is UNKNOWN. Loading observe
+# over it could silently downgrade a live enforce rule — refuse until
+# the verdict is readable.
+#
+# ENFORCE mode is exempt: loading enforce cannot downgrade anything
+# (it is the stronger mode), so that path heals instead.
+- name: Refuse to load a weaker mode over an unreadable table
+  ansible.builtin.fail:
+    msg: >-
+      cve_2026_98432 mode guard: the table exists on
+      {{ inventory_hostname }} but its verdict could not be read
+      (nft list chain failed). Refusing to load
+      {{ cve_2026_98432_resolved_mode }} over an unreadable table — the
+      loaded mode is unknown, and loading observe could downgrade a
+      live enforce rule. Re-run once nft responds.
+  when: >-
+    cve_2026_98432_verdict_unreadable | bool
+    and cve_2026_98432_resolved_mode == 'observe'
+
 - name: Install the CVE-2026-98432 ruleset
   ansible.builtin.template:
     src: cve-2026-98432.nft.j2
@@ -292,6 +410,48 @@
     mode: "0644"
   register: cve_2026_98432_rules
   when: not cve_2026_98432_guard_skip
+
+- name: Read the deployed ruleset
+  # The template module's register carries no `content` (only dest and
+  # checksum), so the file is read back. The generation comparison
+  # needs the BYTES that are actually on disk.
+  ansible.builtin.slurp:
+    src: "{{ cve_2026_98432_ruleset_path }}"
+  register: cve_2026_98432_ruleset_raw
+  # In --check the template task reports changed but writes nothing,
+  # so on a fresh host (or after a purge) the file does not exist and
+  # the slurp would abort the play. The downstream
+  # `content | default('')` copes with the missing payload.
+  failed_when: false
+  when: not cve_2026_98432_guard_skip
+
+- name: Compute the ruleset generation
+  # The ruleset FILE's rule count — the other side of the comparison.
+  # Same predicate as the loaded side, so the two are comparable.
+  ansible.builtin.set_fact:
+    cve_2026_98432_ruleset_generation: >-
+      {{ (cve_2026_98432_ruleset_raw.content | default('') | b64decode).splitlines()
+         | map('trim')
+         | select('match', cve_2026_98432_rule_line_pattern)
+         | list | length }}
+
+- name: Compute the loaded generation
+  # The loaded table's rule count — the generation signature, the same
+  # level-triggered check the reconciler uses for netns tables.
+  #
+  # `rules is changed` is EDGE-triggered: it fires only on the run that
+  # rewrote the template. If that run's `nft -f` fails transiently, the
+  # retry re-renders identical bytes, `rules` is not changed, the
+  # verdict still matches the mode, and the load is SKIPPED — leaving
+  # the host table on the previous generation until the pod restarts.
+  # Counting the loaded rules makes the check LEVEL-triggered: the
+  # table either matches the file or it does not.
+  ansible.builtin.set_fact:
+    cve_2026_98432_loaded_generation: >-
+      {{ cve_2026_98432_loaded_chain.stdout.splitlines()
+         | map('trim')
+         | select('match', cve_2026_98432_rule_line_pattern)
+         | list | length }}
 
 - name: Install the ruleset host-side (pod-native)
   # Same bytes, second copy: the reconciler sidecar (and any other
@@ -386,9 +546,7 @@
   # alpine image — no systemctl — so nothing ever created the
   # multi-user.target.wants symlink: the unit sat INSTALLED but
   # DISABLED, and a reboot left the node unprotected until the
-  # chart's scheduled re-run (found live on CMK: 4/5 nodes enabled
-  # by an SSH-era run, the node that joined after the chart took
-  # over disabled). A wants symlink is a plain file operation —
+  # chart's scheduled re-run. A wants symlink is a plain file operation —
   # create it directly. The TARGET is host-absolute (the HOST's
   # systemd resolves it — /host does not exist on the host); the
   # symlink itself is created through the pod's /host mount.
@@ -396,11 +554,11 @@
   # src exists, and the host-absolute target does not exist inside
   # the pod (the unit lives at /host/etc/... there): state=link
   # fails with "Error while linking" on every pod-native run with a
-  # writable host /etc (found live in the e2e port). ln -sf creates
+  # writable host /etc. ln -sf creates
   # the dangling-by-design link idempotently. The mkdir -p first:
   # multi-user.target.wants does not exist on a fresh host /etc
   # (systemd creates it on real hosts; the pod's /host may be a
-  # bare directory — found live on the alpine e2e target).
+  # bare directory).
   ansible.builtin.command:
     cmd: >-
       sh -c 'mkdir -p {{ '/host' if cve_2026_98432_pod_native | bool else '' }}/etc/systemd/system/multi-user.target.wants &&
@@ -408,7 +566,7 @@
       {{ '/host' if cve_2026_98432_pod_native | bool else '' }}/etc/systemd/system/multi-user.target.wants/{{ cve_2026_98432_unit }}'
   # command tasks ALWAYS report changed — without changed_when,
   # every pod-native run reads as changed and the idempotent
-  # scenarios fail (found by review). Changed only when the link was
+  # scenarios fail. Changed only when the link was
   # absent (the check task above).
   changed_when: cve_2026_98432_wants_link_absent.rc | default(1) == 0
   when: >-
@@ -444,27 +602,10 @@
       To roll back deliberately, re-run with
       cve_2026_98432_allow_mode_downgrade=true (see the rollout runbook, R1).
   when: >-
-    cve_2026_98432_table_check.rc == 0
-    and 'drop' in cve_2026_98432_loaded_chain.stdout
+    cve_2026_98432_loaded_verdict == 'enforce'
     and cve_2026_98432_resolved_mode == 'observe'
     and not (cve_2026_98432_allow_mode_downgrade | bool)
     and not (cve_2026_98432_pod_native | bool)
-
-# Fail CLOSED: the table exists but its verdict could not be read
-# (transient nft error). Loading observe over an unreadable table could
-# silently downgrade a live enforce rule — refuse until the verdict is
-# readable.
-- name: Refuse to proceed on an unreadable verdict
-  ansible.builtin.fail:
-    msg: >-
-      cve_2026_98432 mode guard: the table exists on
-      {{ inventory_hostname }} but its verdict could not be read
-      (nft list chain failed). Refusing to load {{ cve_2026_98432_resolved_mode }}
-      over an unreadable table — re-run once nft responds.
-  when: >-
-    cve_2026_98432_table_check.rc == 0
-    and cve_2026_98432_loaded_chain.rc != 0
-    and cve_2026_98432_resolved_mode == 'observe'
 
 # Two-release coexistence (the progressive rollout's canary pattern):
 # on the POD-NATIVE path an observe release's scheduled re-run finding
@@ -493,8 +634,7 @@
       table with observe on {{ inventory_hostname }} (operator-requested
       rollback; the node counts instead of drops from now on).
   when: >-
-    cve_2026_98432_table_check.rc == 0
-    and 'drop' in cve_2026_98432_loaded_chain.stdout
+    cve_2026_98432_loaded_verdict == 'enforce'
     and cve_2026_98432_resolved_mode == 'observe'
     and (cve_2026_98432_allow_mode_downgrade | bool)
 
@@ -503,21 +643,17 @@
     name: "{{ cve_2026_98432_unit }}"
     enabled: true
     # restarted on any change so a new rule file takes effect now;
-    # started otherwise. A MODE FLIP must also restart: the unit is a
-    # oneshot with RemainAfterExit — `started` on an already-active
-    # unit is a no-op, so an observe→enforce (or sanctioned downgrade)
-    # whose unit file is unchanged would otherwise never reload the
-    # table. The loaded-verdict check (from the guard) detects the flip.
+    # started otherwise. A MODE FLIP or a HEAL must also restart: the
+    # unit is a oneshot with RemainAfterExit — `started` on an
+    # already-active unit is a no-op, so a flip (or a table deleted
+    # out-of-band) whose unit file is unchanged would otherwise never
+    # reload the table.
     state: >-
       {{ 'restarted'
          if cve_2026_98432_rules is changed
             or cve_2026_98432_unit_file is changed
             or cve_2026_98432_unit_file is skipped
-            or (cve_2026_98432_table_check.rc == 0
-                and ((cve_2026_98432_resolved_mode == 'observe'
-                       and 'drop' in cve_2026_98432_loaded_chain.stdout)
-                      or (cve_2026_98432_resolved_mode == 'enforce'
-                          and 'log prefix' in cve_2026_98432_loaded_chain.stdout)))
+            or cve_2026_98432_table_action in ('heal', 'flip')
          else 'started' }}
     daemon_reload: true
   # Under --check the unit file is never copied, so systemd cannot find
@@ -533,32 +669,34 @@
   # the table load is netlink — nft -f from the pod's own ruleset copy.
   ansible.builtin.command: nft -f {{ cve_2026_98432_ruleset_path }}
   register: cve_2026_98432_direct_load
-  # Idempotent: only a change when the table was missing, the ruleset
-  # changed, or the loaded verdict differs from the requested mode
-  # (mode flip) — a same-mode re-run on an already-loaded table is
-  # zero-change.
-  changed_when: >-
-    cve_2026_98432_table_check.rc != 0
-    or cve_2026_98432_rules is changed
-    or (cve_2026_98432_table_check.rc == 0
-        and ((cve_2026_98432_resolved_mode == 'observe'
-               and 'drop' in cve_2026_98432_loaded_chain.stdout)
-              or (cve_2026_98432_resolved_mode == 'enforce'
-                  and 'log prefix' in cve_2026_98432_loaded_chain.stdout)))
+  # CONDITIONAL, not unconditional: the ruleset's add/delete-table
+  # preamble makes every `nft -f` a full table replace, and a table
+  # replace frees the rule's embedded counter (nft counters live in
+  # the rule object; a recreated rule starts at 0 — there is no
+  # syntax to seed it with the old value). The unconditional hourly
+  # re-run reset matched/dropped counters to 0 on every pod-mode node.
+  # The systemd
+  # path never had the bug: `state: started` on an active oneshot is
+  # a no-op. This mirrors that no-op semantics: reload ONLY when the
+  # table is missing (the out-of-band self-heal contract), the
+  # ruleset file changed, or the mode flipped (the fact — a flip
+  # takes effect on the very next run). Every executed load IS a
+  # change — the convergence condition gates execution, so
+  # changed_when is simply true.
+  changed_when: true
   ignore_errors: "{{ ansible_check_mode }}"
   when: >-
     (cve_2026_98432_host_etc_writable.stdout != 'yes'
      or cve_2026_98432_systemd_usable.rc != 0)
     and not cve_2026_98432_guard_skip
-
-- name: Reload the ruleset when the table was missing
-  ansible.builtin.command: nft -f {{ cve_2026_98432_ruleset_path }}
-  when: >-
-    cve_2026_98432_table_check.rc != 0
-    and cve_2026_98432_host_etc_writable.stdout == 'yes'
-    and cve_2026_98432_systemd_usable.rc == 0
-  changed_when: true
-  ignore_errors: "{{ ansible_check_mode }}"
+    and (cve_2026_98432_table_action in ('heal', 'flip')
+         or cve_2026_98432_rules is changed
+         or cve_2026_98432_loaded_generation
+            != cve_2026_98432_ruleset_generation)
+  # The 'heal' term closes the self-heal gap: a half-deleted table
+  # (the table exists — table_check rc 0 — but its input chain is
+  # gone) left the rule unloaded forever; the verdict fact resolves
+  # 'absent' and this term fires the reload.
 
 - name: Verify the rule is loaded and counted
   ansible.builtin.command: nft list chain ip {{ cve_2026_98432_table }} input

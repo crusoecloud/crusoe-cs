@@ -3,17 +3,24 @@
 # If it times out here, the kernel (or an existing firewall) already
 # drops option-bearing packets and the post-rule probe would pass
 # vacuously — the run reports that instead of claiming the mitigation
-# worked. Runs with gather_facts: false via raw python3 — no facts, no
-# become, mirroring the pre-flight play's constraints.
+# worked.
+#
+# The SHARED probe engine's raw trigger (IP_HDRINCL — the options are
+# built into the packet bytes; no setsockopt(IP_OPTIONS), no socket
+# inet_opt on the client path — the unattestable client path on
+# unpatched kernels). The
+# baseline is the raw trigger's FALSE-POSITIVE guard: a malformed
+# raw packet is silently discarded by the kernel, which enforce mode
+# would misread as 'dropped'. --mode baseline proves the trigger is
+# well-formed on THIS kernel (options SYN ACKed, plain SYN connects)
+# BEFORE the rule exists — so a post-rule drop is the rule's doing.
 - name: Baseline — SYN with IP options must connect before the rule
-  ansible.builtin.raw: >-
-    python3 -c 'import socket, sys;
-    NOP = b"\x01\x01\x01\x01";
-    srv = socket.create_server(("127.0.0.1", 0));
-    c = socket.socket();
-    c.setsockopt(socket.IPPROTO_IP, socket.IP_OPTIONS, NOP);
-    c.settimeout(2);
-    sys.exit(0) if c.connect(srv.getsockname()) is None else sys.exit(1)'
+  ansible.builtin.script:
+    cmd: >-
+      {{ role_path }}/../nft_rules/files/nft-probe.py
+      --mode baseline
+      --table {{ cve_2026_98432_table }}
+    executable: python3
   register: cve_2026_98432_baseline
   changed_when: false
   failed_when: false
@@ -25,4 +32,26 @@
       before the rule loaded (rc={{ cve_2026_98432_baseline.rc }}).
       The post-rule probe cannot prove the mitigation; investigate what
       already drops option-bearing packets on this host.
-  when: cve_2026_98432_baseline.rc != 0
+  # rc contract: 1 = PASS (the trigger is well-formed — the options SYN
+  # connected pre-rule); 0 = VACUOUS (something already drops); 2 =
+  # collateral (the PLAIN SYN failed); 3 = crash. This report is the
+  # VACUOUS case ONLY.
+  when: cve_2026_98432_baseline.rc == 0
+
+- name: Report a collateral-damage baseline
+  # rc 2: the PLAIN SYN failed — something on this host breaks normal
+  # TCP, a different (worse) problem than options filtering.
+  ansible.builtin.debug:
+    msg: >-
+      cve_2026_98432: the baseline PLAIN SYN failed on {{ inventory_hostname }}
+      (rc={{ cve_2026_98432_baseline.rc }}) — normal TCP is broken on this
+      host; investigate before trusting any probe evidence.
+  when: cve_2026_98432_baseline.rc == 2
+
+- name: Report a crashed baseline
+  ansible.builtin.debug:
+    msg: >-
+      cve_2026_98432: the baseline probe CRASHED on {{ inventory_hostname }}
+      (rc={{ cve_2026_98432_baseline.rc }}) — the raw trigger could not run
+      on this kernel; the post-rule probe's drop evidence is unreliable.
+  when: cve_2026_98432_baseline.rc >= 3

@@ -21,9 +21,61 @@
     group: root
     mode: "0755"
 
+- name: Stop the legacy metrics timer (pod-native)
+  # A host timer loaded by an SSH-era run keeps firing after the
+  # script is gone — a failed service every interval until reboot
+  # (the review's finding). The pod is privileged with /host mounted:
+  # chroot reaches the host's systemd (the alpine image has no
+  # systemctl of its own). `failed_when: false`: the timer may not
+  # exist (a pod-native node never installed it).
+  #
+  # BY DESIGN this stops the timer on EVERY pod-native run: the
+  # pod-native path never installs one (the alpine image ships no
+  # systemctl, so cve_2026_98432_systemd_usable.rc != 0 and the
+  # install tasks skip) — host-series freshness in chart deployments
+  # is the reconciler's 10s republish, NOT a host timer. The only
+  # timer this can stop is an SSH-era leftover, which is exactly
+  # what it is for. cve_2026_98432_metrics_interval_seconds is inert
+  # in chart deployments (bare-VM/SSH delivery only).
+  ansible.builtin.command:
+    cmd: >-
+      sh -c 'chroot /host systemctl disable --now cve-2026-98432-metrics.timer
+      2>/dev/null; chroot /host systemctl daemon-reload 2>/dev/null || true'
+  when:
+    - cve_2026_98432_pod_native | bool
+    - cve_2026_98432_host_etc_writable.stdout == 'yes'
+  changed_when: false
+  failed_when: false
+
+- name: Remove the legacy metrics script
+  # Hosts that ran the role over SSH still carry the pre-nft_rules
+  # SCRIPT. Its extraction is
+  # `sed ... hdrlength != 5 counter packets N ... | head -1` — against
+  # the loopback split that matches the LOOPBACK rule first, so it
+  # publishes the loopback count as matched_packets_total (and as
+  # dropped_packets_total in enforce).
+  #
+  # ONLY the script is legacy. The unit and timer NAMES never changed
+  # (the units now ExecStart the shared engine), and this task runs
+  # BEFORE the install tasks — removing the units would delete the
+  # current ones and make every run non-idempotent.
+  ansible.builtin.file:
+    path: "{{ cve_2026_98432_legacy_metrics_script }}"
+    state: absent
+  # No gate: state: absent is a no-op when the file is missing, and
+  # the old gate (host_etc_writable) tested /etc/nftables — the wrong
+  # path for a script in /usr/local/sbin (the SSH path skipped the
+  # removal entirely, found live by the upgrade e2e).
+
 - name: Install the metrics script
+  # The SHARED sh engine (roles/nft_rules/files/nft-metrics.sh):
+  # POSIX sh, zero host dependencies — the systemd timer runs it on
+  # the HOST's userspace, where python3 is NOT a guaranteed dependency
+  # (metrics is not optional; the probe's python3 requirement is
+  # escapable via run_probe=false, this is not). The identity flows
+  # via NFT_METRICS_* env (the unit and the one-shot task below).
   ansible.builtin.copy:
-    src: cve-2026-98432-metrics.sh
+    src: "{{ role_path }}/../nft_rules/files/nft-metrics.sh"
     dest: "{{ cve_2026_98432_metrics_script }}"
     owner: root
     group: root
@@ -38,28 +90,40 @@
     mode: "0755"
   when: cve_2026_98432_host_etc_writable.stdout | default('no') == 'yes' and cve_2026_98432_systemd_usable.rc | default(1) == 0
 
-- name: Install the metrics units
+- name: Install the metrics service unit
   ansible.builtin.copy:
-    src: "{{ item }}"
-    dest: "{{ '/host' if cve_2026_98432_pod_native | bool else '' }}/etc/systemd/system/{{ item }}"
+    src: cve-2026-98432-metrics.service
+    dest: "{{ '/host' if cve_2026_98432_pod_native | bool else '' }}/etc/systemd/system/cve-2026-98432-metrics.service"
     owner: root
     group: root
     mode: "0644"
-  loop:
-    - cve-2026-98432-metrics.service
-    - cve-2026-98432-metrics.timer
   register: cve_2026_98432_metrics_units
   # The systemd timer is the HOST's consumer (bare VMs). Pod-native
   # targets without a writable host /etc have no systemd to run it —
   # the chart's scheduled re-run re-executes the script instead.
   when: cve_2026_98432_host_etc_writable.stdout | default('no') == 'yes' and cve_2026_98432_systemd_usable.rc | default(1) == 0
 
-- name: Publish the metrics every minute
+- name: Install the metrics timer
+  # The ONLY parameterized unit: the cadence
+  # (cve_2026_98432_metrics_interval_seconds, default 60). The
+  # service unit is static — it lives in files/.
+  ansible.builtin.template:
+    src: cve-2026-98432-metrics.timer.j2
+    dest: "{{ '/host' if cve_2026_98432_pod_native | bool else '' }}/etc/systemd/system/cve-2026-98432-metrics.timer"
+    owner: root
+    group: root
+    mode: "0644"
+  register: cve_2026_98432_metrics_timer_file
+  when: cve_2026_98432_host_etc_writable.stdout | default('no') == 'yes' and cve_2026_98432_systemd_usable.rc | default(1) == 0
+
+- name: Publish the metrics on the timer
   ansible.builtin.systemd:
     name: "{{ cve_2026_98432_metrics_timer }}"
     enabled: true
-    state: started
-    daemon_reload: "{{ cve_2026_98432_metrics_units is changed }}"
+    # restarted when a unit file changed (a cadence flip takes effect
+    # now, not at the next boot); started otherwise.
+    state: "{{ 'restarted' if cve_2026_98432_metrics_units is changed or cve_2026_98432_metrics_timer_file is changed else 'started' }}"
+    daemon_reload: "{{ cve_2026_98432_metrics_units is changed or cve_2026_98432_metrics_timer_file is changed }}"
   ignore_errors: "{{ ansible_check_mode }}"
   when: cve_2026_98432_host_etc_writable.stdout | default('no') == 'yes' and cve_2026_98432_systemd_usable.rc | default(1) == 0
 
@@ -68,9 +132,14 @@
   # scheduled re-run re-executes this script; run it once now so the
   # sidecar has fresh metrics immediately after this run. The script's
   # destination must be the HOST-side dir (the sidecar mounts the
-  # hostPath, not this container's /var/lib).
+  # hostPath, not this container's /var/lib). The identity env names
+  # the table/prefix/match — the engine is parameterized, the role's
+  # vars are the single source of truth.
   ansible.builtin.command: >-
-    sh -c 'CVE_METRICS_CHART_DIR={{ cve_2026_98432_metrics_host_dir_pod }}
+    sh -c 'NFT_METRICS_TABLE={{ cve_2026_98432_table }}
+    NFT_METRICS_PREFIX={{ cve_2026_98432_table }}
+    NFT_METRICS_MATCH="hdrlength != 5"
+    NFT_METRICS_CHART_DIR={{ cve_2026_98432_metrics_host_dir_pod }}
     sh {{ cve_2026_98432_metrics_script }}'
   changed_when: false
   when: cve_2026_98432_host_etc_writable.stdout | default('no') != 'yes' or cve_2026_98432_systemd_usable.rc | default(1) != 0

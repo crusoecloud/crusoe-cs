@@ -1,0 +1,36 @@
+---
+# The nft_rules role's parameter contract — documented, not
+# executed (this role has NO tasks; it is the delivery vehicle for
+# the shared engines, baked into the image by the Dockerfile's
+# `COPY roles/ /opt/ansible/roles/`).
+#
+# A stateful nft mitigation consumes the engines with these
+# parameters; the identity is the CONSUMER's (its role vars are the
+# single source of truth):
+#
+#   nft-probe.py --mode <enforce|observe> --table <table>
+#     The behavior probe. rc 1 = PASS, 0 = not working,
+#     2 = plain-SYN collateral, 3 = crash. python3 required (the
+#     probe is optional — consumers may disable it).
+#
+#   nft-metrics.sh (the ONE metrics engine — host-side CLI AND the
+#     library a future mitigation's host script sources)
+#     NFT_METRICS_TABLE    the nft table to list
+#     NFT_METRICS_PREFIX   the metric series prefix
+#     NFT_METRICS_MATCH    the rule-shape fragment locating the
+#                          MATCH counter (the observe rule renders a
+#                          second, rate-limited log counter that must
+#                          not be published)
+#     NFT_METRICS_NODE_EXPORTER_DIR / NFT_METRICS_CHART_DIR
+#     POSIX sh — zero host dependencies (the timer runs on the HOST's
+#     userspace; python3 is NOT a guaranteed dependency there).
+#
+#     POD-side (the reconciler's per-sweep host republish): the
+#     reconciler publishes the host series INLINE — it already reads
+#     the host chain, parses counters, and writes exposition; no
+#     second engine file exists.
+#
+# The counter parser exists in both metrics engines (sed in sh,
+# regex in Python) — the price of the runtime split; drift is pinned
+# by tests asserting the same counter values from the same chain
+# listings.

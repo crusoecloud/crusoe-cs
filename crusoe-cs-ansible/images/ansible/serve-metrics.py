@@ -176,7 +176,7 @@ def make_handler(metrics_dir):
     return Handler
 
 
-def log_startup(metrics_dir, port):
+def log_startup(metrics_dir, port, bind="0.0.0.0"):
     """One startup line to stderr — the reconciler's pattern. The
     server is deliberately quiet (access logs suppressed; vmagent
     scrapes every 150s), but TOTAL silence is indistinguishable
@@ -190,7 +190,7 @@ def log_startup(metrics_dir, port):
         prom_files = []
     print(
         f"serve-metrics: serving {len(prom_files)} prom file(s) from "
-        f"{metrics_dir} on :{port}",
+        f"{metrics_dir} on {bind}:{port}",
         file=sys.stderr,
         flush=True,
     )
@@ -200,10 +200,17 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dir", required=True, help="textfile directory")
     parser.add_argument("--port", type=int, default=19698)
+    # The bind address. Defaults to 0.0.0.0 for backwards compatibility
+    # (every existing scrape config targets it), but with hostNetwork
+    # the pod shares the node's namespace — so 0.0.0.0 exposes an
+    # unauthenticated endpoint on the node's PUBLIC interface wherever
+    # the provider firewall allows it. Pin it to the node's internal IP
+    # (the downward API's status.hostIP) where that matters.
+    parser.add_argument("--bind", default="0.0.0.0")
     args = parser.parse_args()
-    log_startup(args.dir, args.port)
+    log_startup(args.dir, args.port, args.bind)
     with http.server.ThreadingHTTPServer(
-        ("0.0.0.0", args.port), make_handler(args.dir)
+        (args.bind, args.port), make_handler(args.dir)
     ) as srv:
         srv.serve_forever()
 

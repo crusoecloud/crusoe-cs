@@ -1,19 +1,24 @@
 ---
 # Live probe — the end-to-end proof that the rule behaves per mode on
-# THIS kernel. python3 connections over loopback (loopback traffic
-# traverses the input hook):
-#   enforce: SYN with four NOP IP options (IHL 6) must TIME OUT (dropped);
-#            plain SYN must still CONNECT (no collateral damage)
-#   observe:  options SYN must CONNECT (rule not dropping) AND the rule's
-#            matched counter must increment (rule counting — the evidence
-#            pipeline proven end-to-end); plain SYN must connect
+# THIS kernel. Runs the SHARED probe engine (roles/nft_rules/
+# files/nft-probe.py) with this role's identity: the raw-socket
+# options-SYN trigger (IP_HDRINCL — no socket inet_opt on the client
+# path, the unattestable client path on unpatched kernels) plus the
+# plain-SYN control.
+#   enforce: the options SYN must get NO SYN-ACK (dropped at priority
+#            raw, before the listener); a plain SYN must still CONNECT.
+#   observe: the options SYN must be ACKed AND the rule's match
+#            counter must increment; a plain SYN must connect.
 # A kernel that strips or rejects options on its own would make the
-# enforce probe pass vacuously — which is why the wrapper playbook also
-# runs the baseline probe BEFORE the role (see baseline.yml) and fails if
-# the options probe does not connect there.
+# enforce probe pass vacuously — which is why the wrapper playbook
+# also runs the baseline probe BEFORE the role (see baseline.yml) and
+# fails if the options SYN does not connect there.
 - name: Run the drop probe script
   ansible.builtin.script:
-    cmd: probe.py --mode {{ cve_2026_98432_resolved_mode }}
+    cmd: >-
+      {{ role_path }}/../nft_rules/files/nft-probe.py
+      --mode {{ cve_2026_98432_resolved_mode }}
+      --table {{ cve_2026_98432_table }}
     executable: python3
   register: cve_2026_98432_probe
   changed_when: false

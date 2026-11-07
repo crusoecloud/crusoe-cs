@@ -43,12 +43,22 @@ cve_2026_98432_mode: "auto"
 cve_2026_98432_node_name: "{{ lookup('env', 'NODE_NAME') }}"
 cve_2026_98432_mode_label: cve-2026-98432.remediator.crusoe.ai/mode
 
-# Run the live drop probe after loading the rule: a python3 SYN with IP
-# options must time out, and a plain SYN must still connect. Needs
-# python3 on the target. Keep true — it is the end-to-end proof that
-# the rule actually drops on THIS kernel.
+# Run the live drop probe after loading the rule: the shared engine's
+# RAW-SOCKET options SYN (IP_HDRINCL — the options are built into the
+# packet bytes; the sending socket never calls setsockopt(IP_OPTIONS),
+# so no inet_opt alloc/free on the client path — safe on unpatched
+# kernels by construction) must get no SYN-ACK, and a plain SYN must
+# still connect. Needs python3 on the target. Keep true — it is the
+# end-to-end proof that the rule actually drops on THIS kernel.
 cve_2026_98432_run_probe: true
 
 # Publish node_exporter textfile metrics (rule loaded + drop counter)
 # when /var/lib/node_exporter exists. Never installs node_exporter.
 cve_2026_98432_metrics: true
+
+# The metrics timer's cadence (seconds). Default 60 = the historical
+# node_exporter textfile convention. The trade-off is rate resolution
+# vs. one `nft list` per fire (cheap): a bare-VM fleet doing burst
+# detection can drop to 10 for k8s-parity freshness — bursts then
+# localize to ~10s instead of blurring into the minute.
+cve_2026_98432_metrics_interval_seconds: 60

@@ -58,6 +58,7 @@ def run(
     retry_delay: float = 2.0,
     check: bool = True,
     timeout: float | None = None,
+    cwd: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run argv, retrying transient failures (API blips).
 
@@ -76,6 +77,7 @@ def run(
                 capture_output=True,
                 text=True,
                 timeout=timeout,
+                cwd=cwd,
             )
         except subprocess.TimeoutExpired:
             last = None

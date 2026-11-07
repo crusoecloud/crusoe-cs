@@ -15,7 +15,18 @@ cve_2026_98432_ruleset_host_path: /host/etc/nftables/cve-2026-98432.nft
 # the loaded table (no flip during an outage or a restart inside one).
 cve_2026_98432_mode_state_path: /host/etc/nftables/cve-2026-98432.mode
 cve_2026_98432_unit: cve-2026-98432.service
-cve_2026_98432_metrics_script: /usr/local/sbin/cve-2026-98432-metrics.sh
+# The rule-line pattern for the generation signature. A role VAR, not
+# an inline Jinja string literal: Jinja's lexer unescapes escape
+# sequences, so a regex \b written inline silently became a BACKSPACE
+# and both generation counts were always 0. In a YAML scalar there is
+# no lexer — what you write is what the regex engine gets.
+#
+# No backslashes by design: the token is always followed by a space in
+# both the ruleset file and the nft listing, so a space does the job
+# a word boundary would.
+cve_2026_98432_rule_line_pattern: '^(iif|oif|ip|ip6|tcp|udp|meta|ct) .*counter'
+
+cve_2026_98432_metrics_script: /usr/local/sbin/nft-metrics.sh
 cve_2026_98432_metrics_unit: cve-2026-98432-metrics.service
 cve_2026_98432_metrics_timer: cve-2026-98432-metrics.timer
 cve_2026_98432_prom_path: /var/lib/node_exporter/cve_2026_98432.prom
@@ -26,3 +37,16 @@ cve_2026_98432_prom_path: /var/lib/node_exporter/cve_2026_98432.prom
 # hostPath, not the container's own /var/lib.
 cve_2026_98432_metrics_host_dir: /var/lib/crusoe-mitigator
 cve_2026_98432_metrics_host_dir_pod: /host/var/lib/crusoe-mitigator
+
+# The pre-nft_rules metrics SCRIPT — the only legacy artifact. The
+# unit and timer NAMES never changed (only the script was renamed,
+# cve-2026-98432-metrics.sh -> nft-metrics.sh), so the units are NOT
+# legacy and must not be removed: the removal task runs BEFORE the
+# install tasks, and deleting the current units would make every run
+# non-idempotent (delete + reinstall + restart, hourly).
+#
+# The legacy script's first-counter extraction reads the loopback rule
+# (which now renders first) and publishes it as matched_packets_total.
+# Mode-aware: pod-native sees the host through /host; the SSH path
+# writes the host's filesystem directly.
+cve_2026_98432_legacy_metrics_script: "{{ '/host' if cve_2026_98432_pod_native | bool else '' }}/usr/local/sbin/cve-2026-98432-metrics.sh"

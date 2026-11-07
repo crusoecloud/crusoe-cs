@@ -1,0 +1,5 @@
+# Tool caches from any component's local analysis.
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+__pycache__/

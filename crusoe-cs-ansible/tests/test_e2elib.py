@@ -13,6 +13,7 @@ import subprocess
 from unittest import mock
 
 import pytest
+from ruleset_source import Ruleset
 
 from e2e.lib import parsers, runner, syn
 from e2e.lib.logging_setup import get_logger  # noqa: F401 (tested below)  # noqa: E402
@@ -128,12 +129,20 @@ class TestRetryTransient:
 
 class TestParsers:
     def test_nft_counter(self):
-        out = (
-            "table ip cve_2026_98432 {\n\tchain input {\n"
-            "\t\tip protocol tcp ip hdrlength != 5 "
-            "counter packets 6 bytes 368 drop\n\t}\n}"
-        )
+        out = Ruleset.render("enforce").listing(counters={1: 6})
         assert parsers.nft_counter(out) == 6
+
+    def test_nft_counter_anchors_on_the_verdict_rule(self):
+        # The loopback split renders a count-only rule FIRST — a
+        # first-counter anchor reads the LOOPBACK counter and the
+        # phase-4 vantage asserts read 0→0 while the verdict rule's
+        # counter moved. The parser must anchor on the VERDICT rule
+        # (drop / log prefix).
+        out = Ruleset.render("enforce").listing(counters={0: 0, 1: 6})
+        assert parsers.nft_counter(out) == 6, (
+            "the parser must read the VERDICT rule's counter (6), not "
+            "the loopback rule's (0) — the loopback rule renders first"
+        )
 
     def test_nft_counter_absent_rule(self):
         assert parsers.nft_counter("no such chain") == -1
@@ -267,3 +276,69 @@ class TestSyn:
         assert syn.is_blocked("BLOCKED\n")
         assert syn.is_connected("CONNECTED")
         assert not syn.is_blocked("ConnectionRefusedError")
+
+
+class TestScaleDaemonsetToZero:
+    """The deterministic DaemonSet drain.
+
+    A DaemonSet has NO replicas field (node-count-driven) and no
+    scale subresource — kubectl scale fails NotFound and
+    spec.replicas is silently dropped (both verified live on CMK).
+    The drain is a nodeSelector no node carries.
+    """
+
+    def test_the_method_exists(self):
+        from e2e.lib import kube_cluster
+
+        assert hasattr(kube_cluster.KubeCluster, "scale_daemonset_to_zero"), (
+            "the Cluster class must expose the typed drain"
+        )
+
+    def test_the_patch_is_a_non_matching_node_selector(self):
+        import inspect
+
+        from e2e.lib import kube_cluster
+
+        src = inspect.getsource(kube_cluster.KubeCluster.scale_daemonset_to_zero)
+        assert "nodeSelector" in src, "the drain must be a nodeSelector"
+        assert "crusoe-mitigator-scale-down" in src, (
+            "the nodeSelector must match no node"
+        )
+        # The CODE must not set replicas (the docstring explains why).
+        code = src.split('"""', 2)[-1]
+        assert "replicas" not in code.split("nodeSelector")[0], (
+            "a DaemonSet has no replicas field — spec.replicas is silently dropped"
+        )
+        assert "patch_namespaced_daemon_set" in src, (
+            "the native k8s client's patch, not a kubectl shell-out"
+        )
+
+
+class TestDaemonsetGetter:
+    """The typed DaemonSet read — the coverage source.
+
+    The roll wait compares the Ready count against
+    status.desiredNumberScheduled, so the cluster lib must expose
+    the DaemonSet in the same kubectl-shaped wire form as pods().
+    """
+
+    def test_the_method_exists(self):
+        from e2e.lib import kube_cluster
+
+        assert hasattr(kube_cluster.KubeCluster, "daemonset"), (
+            "the Cluster class must expose the typed DaemonSet read"
+        )
+
+    def test_the_read_is_native_and_wire_shaped(self):
+        import inspect
+
+        from e2e.lib import kube_cluster
+
+        src = inspect.getsource(kube_cluster.KubeCluster.daemonset)
+        assert "read_namespaced_daemon_set" in src, (
+            "the native k8s client's read, not a kubectl shell-out"
+        )
+        assert "sanitize_for_serialization" in src, (
+            "the wire form (camelCase) — the callers assert against "
+            "status.desiredNumberScheduled"
+        )

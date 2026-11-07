@@ -7,6 +7,11 @@ inventory/host_vars/*
 venv_temp/
 .cache/
 __pycache__/
+# Tool caches (mypy/ruff/pytest) — local analysis artifacts, never
+# source.
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
 *.pyc
 *.retry
 logs/
@@ -15,6 +20,7 @@ tests/e2e/emudhra-ca/.inventory.ini
 tests/e2e/emudhra-ca/.inventory-*.ini
 tests/e2e/emudhra-ca/.run-*.log
 tests/cve-2026-98432/e2e/inventory.tmp
+tests/e2e/cve-2026-98432/inventory.*.tmp
 
 # agent working scratch (SDD briefs, ledgers)
 .superpowers/

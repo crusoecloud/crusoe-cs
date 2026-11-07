@@ -66,8 +66,7 @@ def test_host_root_mounts_propagate_host_mounts():
     # later on the host are INVISIBLE inside the container, so
     # nsenter opens a plain file and fails with "Invalid argument"
     # — every pod scheduled after the mitigator stays uncovered
-    # until the /proc scan catches it (found live:
-    # ~10s exposure window per fresh pod). HostToContainer (rslave
+    # until the /proc scan catches it. HostToContainer (rslave
     # under the hood) makes the host's mounts visible here. Required
     # on BOTH containers that mount host-root: the sidecar (sweep,
     # --verify, --undo) and the mitigator (the purge op's fallback
@@ -94,8 +93,7 @@ def test_pod_spec_requires_hostnetwork():
     # the pod is hostNetwork. Without it the rule loads in the pod's
     # isolated netns: the probe, metrics, and reconciler all read it
     # there and report protected while the host netns (kubelet, sshd,
-    # hostNetwork pods) stays bare (found live on a
-    # real fleet — the hostNetwork regression this test guards).
+    # hostNetwork pods) stays bare.
     out = helm_template()
     assert "hostNetwork: true" in out
     # The standard companion (the sibling chart's reviewed pattern):
@@ -107,6 +105,32 @@ def test_mitigations_env_renders_mode():
     # AUTO mode renders NO mode var — the role's defaults own it.
     out = helm_template()
     assert "cve_2026_98432_mode=" not in out
+
+
+def test_metrics_interval_flows_from_helm():
+    # The timer cadence is Helm-settable: the entry's vars flow
+    # through MITIGATIONS as -e pairs, overriding the role default
+    # (60). The safe override shape is a values FILE (--set
+    # mitigations[0]... REPLACES the list element wholesale).
+    out = helm_template_values(
+        """
+mitigations:
+  - name: cve-2026-98432
+    enabled: true
+    playbook: wrapper-cve-2026-98432-pod.yml
+    interval: 3600
+    vars:
+      cve_2026_98432_run_probe: "true"
+      cve_2026_98432_metrics: "true"
+      cve_2026_98432_fail_on_unsupported_family: "true"
+      cve_2026_98432_metrics_interval_seconds: "10"
+"""
+    )
+    assert "cve_2026_98432_metrics_interval_seconds=10" in out, (
+        "the cadence var must flow from the chart's values through "
+        "MITIGATIONS to the role — the knob is discoverable where "
+        "operators look (the chart), not only in role defaults"
+    )
 
 
 def test_mode_pin_via_entry_vars():
@@ -213,6 +237,88 @@ def test_failure_threshold_zero_renders():
     out = helm_template("--set", "mitigationMaxConsecutiveFailures=0")
     assert "MITIGATION_MAX_CONSECUTIVE_FAILURES" in out
     assert 'value: "0"' in out
+
+
+class TestPriorityAndResources:
+    """The reported eviction gap (concern 1): the DaemonSet ran
+    BestEffort at default priority — under memory pressure (common
+    on GPU nodes during big jobs) the kubelet evicts BestEffort pods
+    FIRST, and while the mitigator is gone its netns reconciler
+    isn't running: pods created in that window get no netns rule
+    until it's back. Two optional values, both default-empty (the
+    chart stays minimal; the operator opts in per fleet):
+      priorityClassName — e.g. system-node-critical (the Cilium
+        pattern: the node's security infrastructure must not be the
+        first thing evicted)
+      resources — per container (mitigator, the sidecar, the
+        metrics-server): requests keep the pod OUT of BestEffort
+        (the eviction class), limits cap it."""
+
+    def test_priority_class_name_renders(self):
+        out = helm_template("--set", "priorityClassName=system-node-critical")
+        assert "priorityClassName: system-node-critical" in out, (
+            "the pod-level priorityClassName must render when set — "
+            "without it the mitigator is BestEffort-at-default-priority "
+            "and the kubelet evicts it first under memory pressure"
+        )
+
+    def test_priority_class_name_absent_by_default(self):
+        out = helm_template()
+        assert "priorityClassName" not in out, (
+            "the default stays minimal — the operator opts in per fleet"
+        )
+
+    def test_mitigator_container_resources_render(self):
+        out = helm_template_values(
+            """
+resources:
+  mitigator:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      memory: 512Mi
+"""
+        )
+        assert "cpu: 100m" in out
+        assert "memory: 128Mi" in out
+        assert "memory: 512Mi" in out
+
+    def test_sidecar_resources_render(self):
+        # The reconciler sidecar carries its own block — the
+        # all three containers are configurable.
+        out = helm_template_values(
+            """
+resources:
+  reconciler:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+"""
+        )
+        assert "cpu: 50m" in out
+        assert "memory: 64Mi" in out
+
+    def test_metrics_server_resources_render(self):
+        out = helm_template_values(
+            """
+resources:
+  metricsServer:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+"""
+        )
+        assert "cpu: 10m" in out
+        assert "memory: 32Mi" in out
+
+    def test_resources_absent_by_default(self):
+        out = helm_template()
+        assert "requests:" not in out, (
+            "no resources block by default — the chart stays minimal; "
+            "the operator opts in (a default request would change "
+            "scheduling on every existing fleet)"
+        )
 
 
 def test_failure_threshold_env_rendered():
@@ -352,7 +458,7 @@ def test_emudhra_run_wires_capture_output():
     # chart-smoke.py's run() gained a capture_output kwarg (mypy
     # round) but the body still passed capture_output=True to
     # subprocess.run unconditionally — a caller asking to stream
-    # output got it captured silently (found by review). The kwarg
+    # output got it captured silently. The kwarg
     # must be wired through.
     import importlib.util
     import inspect
@@ -388,3 +494,326 @@ def test_daemonset_has_exactly_one_pod_template():
     )
     # updateStrategy at spec level, BEFORE template:
     assert re.search(r"\n  updateStrategy:.*?\n  template:", body, re.S)
+
+
+class TestCallbackPluginPath:
+    """ANSIBLE_CALLBACK_PLUGINS must point at the CALLBACK directory,
+    not its parent.
+
+    `/opt/ansible/plugins` holds both `callback/` and `module_utils/`.
+    Ansible scans every .py under the configured path as a callback
+    plugin, finds `module_utils/journald.py`, and warns on every run:
+
+        [WARNING]: Skipping plugin (.../module_utils/journald.py) as it
+        seems to be invalid: module 'ansible.plugins.callback.journald'
+        has no attribute 'CallbackModule'
+
+    The callback still loads (the warning is about the helper), so the
+    symptom is noise on every playbook run plus a misleading message
+    that suggests the journald plugin is broken.
+    """
+
+    def test_mitigator_points_at_the_callback_dir(self):
+        out = helm_template()
+        assert "value: /opt/ansible/plugins/callback" in out, (
+            "ANSIBLE_CALLBACK_PLUGINS must be the callback directory — "
+            "the parent makes Ansible scan module_utils/ as callbacks "
+            "and warn on every run"
+        )
+
+    def test_no_chart_points_at_the_plugin_parent(self):
+        # The sibling chart already had this right; a regression in
+        # either would reintroduce the warning.
+        from conftest import COMPONENT_ROOT
+
+        offenders = []
+        for chart in (COMPONENT_ROOT / "charts").iterdir():
+            ds = chart / "templates" / "daemonset.yaml"
+            if not ds.exists():
+                continue
+            for line_no, line in enumerate(ds.read_text().splitlines(), 1):
+                if line.strip() == "value: /opt/ansible/plugins":
+                    offenders.append(f"{chart.name}:{line_no}")
+        assert not offenders, (
+            "a chart points ANSIBLE_CALLBACK_PLUGINS at the plugin "
+            f"parent (Ansible then scans module_utils/): {offenders}"
+        )
+
+
+class TestTolerationsAreOptIn:
+    """Tolerations default to EMPTY: the chart stays minimal and an
+    upgrade changes nothing about where the pod schedules.
+
+    The gap that leaves is documented, loudly: a DaemonSet with no
+    tolerations stays off every tainted node, GPU nodes are usually
+    tainted, and the DaemonSet just schedules fewer pods — nothing
+    reports the gap. The README and the values comment both say so,
+    with the kubectl command to check a fleet.
+    """
+
+    def test_the_default_is_empty(self):
+        import yaml
+
+        from conftest import COMPONENT_ROOT
+
+        values = yaml.safe_load(
+            (COMPONENT_ROOT / "charts" / "crusoe-mitigator" / "values.yaml").read_text()
+        )
+        assert values.get("tolerations") == [], (
+            "tolerations must default to empty — a default that "
+            "tolerates everything would schedule a privileged "
+            "hostNetwork pod on control-plane nodes without anyone "
+            "asking for it"
+        )
+
+    def test_the_default_renders_no_tolerations(self):
+        out = helm_template()
+        assert "tolerations:" not in out, (
+            "an empty default must render no tolerations block"
+        )
+
+    def test_opting_in_renders_the_toleration(self):
+        out = helm_template("--set-json", 'tolerations=[{"operator":"Exists"}]')
+        assert "operator: Exists" in out
+
+    def test_the_values_comment_warns_about_the_gap(self):
+        from conftest import COMPONENT_ROOT
+
+        raw = (
+            COMPONENT_ROOT / "charts" / "crusoe-mitigator" / "values.yaml"
+        ).read_text()
+        assert "GPU nodes are usually tainted" in raw, (
+            "the values comment must warn that the empty default "
+            "silently skips tainted nodes"
+        )
+        assert "kubectl get nodes" in raw, (
+            "the comment must give the operator a way to check their fleet for taints"
+        )
+
+    def test_the_readme_warns_about_the_gap(self):
+        from conftest import COMPONENT_ROOT
+
+        readme = (
+            COMPONENT_ROOT / "charts" / "crusoe-mitigator" / "README.md"
+        ).read_text()
+        assert "GPU nodes are usually tainted" in readme
+
+
+class TestTheMetricsBindIsNotPublic:
+    """With hostNetwork: true the pod shares the node's network
+    namespace, so binding 0.0.0.0 also listens on the node's PUBLIC
+    interface — an unauthenticated endpoint exposing per-namespace
+    series.
+
+    Binding to 127.0.0.1 would break the scrape: vmagent targets the
+    pod IP, which under hostNetwork IS the node's internal address.
+    The correct default is that internal address.
+    """
+
+    def test_the_default_bind_is_the_node_internal_ip(self):
+        out = helm_template()
+        assert '"$(STATUS_HOST_IP)"' in out, (
+            "the metrics server must bind the node's internal address "
+            "by default — 0.0.0.0 also listens on the public interface"
+        )
+
+    def test_status_host_ip_is_injected(self):
+        out = helm_template()
+        assert "fieldPath: status.hostIP" in out, (
+            "STATUS_HOST_IP must come from the downward API"
+        )
+
+    def test_the_bind_is_overridable(self):
+        out = helm_template("--set", "metricsBind=0.0.0.0")
+        assert '"0.0.0.0"' in out, (
+            "an operator must be able to override the bind (a "
+            "node-local scraper may need 0.0.0.0)"
+        )
+
+
+class TestTheValuesTableIsComplete:
+    """Every user-facing value must appear in the README's table.
+
+    A value that exists only in values.yaml is a value an operator
+    cannot discover — and the metrics bind is a security-relevant
+    choice, not a tuning knob.
+    """
+
+    def test_the_metrics_values_are_documented(self):
+        from conftest import COMPONENT_ROOT
+
+        readme = (
+            COMPONENT_ROOT / "charts" / "crusoe-mitigator" / "README.md"
+        ).read_text()
+        for value in ("metricsPort", "metricsBind"):
+            assert f"`{value}`" in readme, (
+                f"{value} must appear in the README's values table"
+            )
+
+    def test_the_bind_choices_are_spelled_out(self):
+        from conftest import COMPONENT_ROOT
+
+        readme = (
+            COMPONENT_ROOT / "charts" / "crusoe-mitigator" / "README.md"
+        ).read_text()
+        # The three meaningful choices, and the one that breaks.
+        assert "status.hostIP" in readme
+        assert "0.0.0.0" in readme
+        assert "127.0.0.1" in readme, (
+            "the README must warn that loopback breaks scraping"
+        )
+
+
+class TestTheBindResolvesPerNode:
+    """`metricsBind` is a DaemonSet-wide setting, so it must resolve
+    PER NODE.
+
+    A literal IP does not work: every node would try to bind the same
+    address, and all but one would fail with "address not available" —
+    the metrics server would die on every other node. The default must
+    therefore be the downward API's status.hostIP, not a literal.
+    """
+
+    def test_the_default_is_the_downward_api_not_a_literal(self):
+        out = helm_template()
+        assert '"$(STATUS_HOST_IP)"' in out, (
+            "the default bind must be the downward API's status.hostIP "
+            "— a literal IP is a per-node address in a fleet-wide "
+            "setting"
+        )
+
+    def test_the_docs_state_the_two_choices(self):
+        from conftest import COMPONENT_ROOT
+
+        readme = (
+            COMPONENT_ROOT / "charts" / "crusoe-mitigator" / "README.md"
+        ).read_text()
+        assert "Two choices only" in readme, (
+            "the README must state that only two values are valid"
+        )
+        assert "fails the render" in readme, (
+            "the README must say an invalid value is rejected, not silently accepted"
+        )
+
+    def test_the_values_comment_warns_too(self):
+        import yaml
+
+        from conftest import COMPONENT_ROOT
+
+        # The comment lives above the key; read the raw text.
+        raw = (
+            COMPONENT_ROOT / "charts" / "crusoe-mitigator" / "values.yaml"
+        ).read_text()
+        assert "resolve PER NODE" in raw, (
+            "the values comment must explain why a literal IP fails"
+        )
+        # And the key itself still parses as the empty sentinel.
+        values = yaml.safe_load(raw)
+        assert values["metricsBind"] == ""
+
+
+class TestTheBindAcceptsOnlyTwoChoices:
+    """`metricsBind` is a DaemonSet-wide setting, so only two values
+    are meaningful:
+
+      ""          the node's own internal IP (resolved per node)
+      "0.0.0.0"   all interfaces
+
+    Anything else is a per-node address in a fleet-wide setting: every
+    node would bind the same address and all but one would fail with
+    "address not available" — the metrics server dies on every other
+    node. A chart that silently accepts that is a chart that lets an
+    operator break their fleet with a plausible-looking value.
+
+    The template fails the render instead.
+    """
+
+    def test_the_two_valid_choices_render(self):
+        assert '"$(STATUS_HOST_IP)"' in helm_template()
+        assert '"0.0.0.0"' in helm_template("--set", "metricsBind=0.0.0.0")
+
+    def test_a_literal_ip_fails_the_render(self):
+        import pytest
+
+        with pytest.raises(Exception, match="metricsBind"):
+            helm_template("--set", "metricsBind=10.0.0.5")
+
+    def test_loopback_fails_the_render(self):
+        # 127.0.0.1 is a valid bind but breaks the scrape — vmagent
+        # targets the pod IP. Reject it rather than let it silently
+        # produce an unscrapable pod.
+        import pytest
+
+        with pytest.raises(Exception, match="metricsBind"):
+            helm_template("--set", "metricsBind=127.0.0.1")
+
+
+class TestTheBindEnvIsInTheRightContainer:
+    """$(VAR) expansion in command/args sees only the SAME container's
+    env. The reconciler's STATUS_HOST_IP does not reach the
+    metrics-server — each container needs its own, or the bind gets
+    the literal string "$(STATUS_HOST_IP)" and dies with
+    "Name does not resolve" (found live on CMK: CrashLoop).
+
+    This test parses the RENDERED manifest and checks the container
+    that runs serve-metrics carries the env it references.
+    """
+
+    def _containers(self, out: str):
+        import yaml
+
+        doc = yaml.safe_load(out)
+        for d in doc["items"] if isinstance(doc, dict) and "items" in doc else [doc]:
+            if not isinstance(d, dict):
+                continue
+            pod = d.get("spec", {}).get("template", {}).get("spec", {})
+            if pod.get("containers"):
+                return pod["containers"]
+        return []
+
+    def test_the_metrics_server_container_has_the_env(self):
+        out = helm_template()
+        # Find the container whose command runs serve-metrics.
+        import yaml
+
+        docs = []
+        for chunk in out.split("---"):
+            if chunk.strip():
+                docs.append(yaml.safe_load(chunk))
+        server = None
+        for d in docs:
+            if not isinstance(d, dict):
+                continue
+            pod = d.get("spec", {}).get("template", {}).get("spec", {})
+            for c in pod.get("containers", []):
+                cmd = " ".join(c.get("command", []) or [])
+                if "serve-metrics" in cmd:
+                    server = c
+        assert server, "the metrics-server container was not found"
+        names = [e["name"] for e in server.get("env", [])]
+        assert "STATUS_HOST_IP" in names, (
+            "the metrics-server container must define STATUS_HOST_IP "
+            "itself — $(VAR) expansion does not see other containers' "
+            "env, so the bind gets the literal string and dies"
+        )
+
+
+def test_metrics_interval_docs_match_the_pod_native_truth():
+    # The knob's documentation must not promise a host timer in
+    # chart deployments: the pod-native image (alpine) ships no
+    # systemctl, so cve_2026_98432_systemd_usable.rc != 0 and the
+    # timer install tasks skip — the reconciler's 10s republish owns
+    # host-series freshness there. A comment claiming the timer runs
+    # on "CMK-style Ubuntu nodes" sends an operator to tune a knob
+    # that does nothing (the review's finding).
+    values = (CHART / "values.yaml").read_text()
+    assert "inert" in values, (
+        "values.yaml must say the cadence knob is INERT in chart "
+        "deployments (pod-native: no systemctl, no timer)"
+    )
+    assert "CMK-style" not in values, (
+        "the knob does NOT run a timer on CMK-style nodes — the "
+        "comment must not claim it does"
+    )
+    readme = (CHART / "README.md").read_text()
+    assert "bare-VM" in readme, "the README must scope the knob to SSH/bare-VM delivery"

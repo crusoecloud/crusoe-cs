@@ -486,6 +486,17 @@ def main():
     while True:
         now = time.monotonic()
         failures = []
+        # Consume the mode event BEFORE the runs, not after: a flip
+        # landing DURING a run must stay set and force the next pass
+        # (found live on CMK — the post-run clear swallowed a mid-run
+        # enforce flip and the node stayed in observe for up to the
+        # full interval). The clear is gated on `scheduled` — an
+        # all-once-only config has no run that can consume the event,
+        # so it stays set for a scheduled entry a future chart
+        # upgrade adds, instead of losing the flip.
+        mode_changed = _mode_event.is_set()
+        if mode_changed and scheduled:
+            _mode_event.clear()
         for name, playbook, vars_argv, interval in mitigations:
             if draining:
                 break
@@ -493,7 +504,7 @@ def main():
             due = last is None or (interval > 0 and now - last >= interval)
             # A mode-change event forces every scheduled mitigation
             # due immediately — the label flip converges in seconds.
-            if _mode_event.is_set() and interval > 0:
+            if mode_changed and interval > 0:
                 due = True
             # A failed scheduled run is not due again until the
             # backoff has passed since the ATTEMPT (see last_attempt):
@@ -520,14 +531,6 @@ def main():
                 last_attempt[name] = time.monotonic()
                 consecutive_failures[name] = consecutive_failures.get(name, 0) + 1
                 failures.append(name)
-        # Clear the mode event ONLY when a scheduled mitigation consumed
-        # it this pass — a config with no scheduled mitigations (all
-        # once-only) leaves the event set; the next scheduled entry
-        # added by a chart upgrade picks it up instead of losing the
-        # flip (the bot review's #1: the unconditional clear swallowed
-        # mode events in once-only-only configs).
-        if scheduled:
-            _mode_event.clear()
 
         if draining:
             log.info("%s: drained; exiting 0", NODE_NAME)

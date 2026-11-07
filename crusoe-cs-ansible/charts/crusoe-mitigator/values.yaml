@@ -82,18 +82,31 @@ mitigations:
     #    below — and NEVER via `--set mitigations[0].vars...`: Helm
     #    REPLACES list elements wholesale, dropping name/playbook/enabled and
     #    silently disabling the mitigation.
-    # Metrics: the role's metrics.sh writes cve_2026_98432.prom into
+    # Metrics: the role's metrics engine (nft-metrics.sh) writes cve_2026_98432.prom into
     # the chart hostPath; the metrics-server sidecar serves it on
     # :19698 (see metricsPort / metricsBackend above).
     metrics: true
     # Scheduled: the nft table can be flushed out-of-band (another
     # tool's `nft flush ruleset`), and the role's table check
     # self-heals it — verified: delete → re-run → restored, changed=1.
+    # The re-run CHECKS every interval but only RELOADS when the
+    # state diverged (table missing, ruleset changed, mode flip) —
+    # a converged table is skipped, preserving the rule's counters
+    # (a table replace frees them; the host evidence series would
+    # otherwise read ~0 forever).
     interval: 3600
     vars:
       cve_2026_98432_run_probe: "true"
       cve_2026_98432_metrics: "true"
       cve_2026_98432_fail_on_unsupported_family: "true"
+      # The metrics timer's cadence (seconds; role default 60). The
+      # timer is the HOST-side consumer and only affects SSH/bare-VM
+      # delivery: the pod-native chart image (alpine) ships no
+      # systemctl, so the timer never installs in chart deployments —
+      # the reconciler's 10s republish owns host-series freshness
+      # there and this var is inert. 10 = burst resolution on
+      # timer-capable (bare-VM) nodes.
+      cve_2026_98432_metrics_interval_seconds: "60"
     # Pod-netns reconciler sidecar: installs the drop rule inside every
     # pod network namespace — event-driven (inotify on /run/netns;
     # Cilium mounts every pod netns there) with an interval fallback
@@ -147,8 +160,9 @@ metricsPort: 19698
 
 # -- HostPath directory the metrics generators write into and the
 #    sidecar serves. Must match the role's
-#    cve_2026_98432_metrics_host_dir (the role creates it; metrics.sh
-#    and the reconciler write here via their env defaults).
+#    cve_2026_98432_metrics_host_dir (the role creates it; the
+#    metrics engine and the reconciler write here via their env
+#    defaults).
 metricsDir: /var/lib/crusoe-mitigator
 
 # -- Metrics egress adapter: "vmagent" (default — pod annotations,
@@ -174,6 +188,38 @@ probes:
 #    above a playbook run's duration; after it kubelet SIGKILLs and
 #    the idempotent re-run on restart repairs any half-finished state.
 terminationGracePeriodSeconds: 10
+
+# -- Pod priority class. EMPTY by default (the chart stays minimal);
+# set on fleets where the mitigator must not be the first thing
+# evicted under memory pressure (BestEffort pods are evicted FIRST —
+# common on GPU nodes during big jobs — and while the pod is gone
+# its netns reconciler isn't running, so pods created in that
+# window get no netns rule until it's back). The Cilium pattern:
+#   priorityClassName: system-node-critical
+priorityClassName: ""
+
+# -- Per-container resources. EMPTY by default (no requests = the
+#    pod stays BestEffort; a default request would change scheduling
+#    on every existing fleet — the operator opts in). Keys map to
+#    the pod's containers: mitigator (the main container), reconciler
+#    (the pod-netns sidecar), metricsServer (the :19698 sidecar).
+#    Requests move the pod out of BestEffort (first-evicted class);
+#    limits cap it.
+resources: {}
+#  mitigator:
+#    requests:
+#      cpu: 100m
+#      memory: 128Mi
+#    limits:
+#      memory: 512Mi
+#  reconciler:
+#    requests:
+#      cpu: 50m
+#      memory: 64Mi
+#  metricsServer:
+#    requests:
+#      cpu: 10m
+#      memory: 32Mi
 
 # -- Scheduled mitigations CrashLoop after this many consecutive
 #    failures (a transient failure rides the retry backoff above;
@@ -204,12 +250,46 @@ journaldLogging: true
 nodeSelector: {}
 #  node-role.kubernetes.io/worker: ""
 
-# Taints the mitigator tolerates. EMPTY means the DaemonSet stays off
-# tainted nodes — which often includes GPU nodes (found by review:
-# a fleet with GPU taints silently lacked coverage there).
-# To cover tainted nodes, e.g.:
+# Taints the mitigator tolerates. EMPTY by default: the chart stays
+# minimal and an upgrade changes nothing about where the pod schedules.
+#
+# ⚠ THE GAP THIS LEAVES: a DaemonSet with no tolerations stays off
+# every tainted node — and GPU nodes are usually tainted, so the hosts
+# most likely to matter can be uncovered, SILENTLY (the DaemonSet just
+# schedules fewer pods; nothing reports the gap). Check your fleet:
+#
+#   kubectl get nodes -o custom-columns='NAME:.metadata.name,TAINTS:.spec.taints'
+#
+# To cover tainted nodes, opt in:
 #   tolerations:
 #   - operator: Exists
+#
+# (operator: Exists with no key tolerates EVERY taint, including
+# control-plane ones — scope it with a key if that is too broad.)
 tolerations: []
+
+# The metrics server's bind address. EMPTY means the node's INTERNAL
+# address (the downward API's status.hostIP, injected as
+# STATUS_HOST_IP).
+#
+# With hostNetwork: true the pod shares the node's network namespace,
+# so 0.0.0.0 would also listen on the node's PUBLIC interface wherever
+# the provider firewall allows it — an unauthenticated endpoint
+# exposing per-namespace series. vmagent scrapes the pod IP, which
+# under hostNetwork IS the internal address, so the default keeps the
+# scrape working while removing the public listener.
+#
+# TWO choices, because this is a DaemonSet-wide setting that must
+# resolve PER NODE:
+#   ""          the node's own internal IP (default; public closed)
+#   "0.0.0.0"   all interfaces (exposes the public interface — firewall
+#               it at the provider level; a NetworkPolicy cannot
+#               restrict hostNetwork pod traffic)
+#
+# Anything else fails the render. A literal IP would make every node
+# bind the same address and all but one fail with "address not
+# available"; 127.0.0.1 would break the scrape (vmagent targets the
+# pod IP).
+metricsBind: ""
 
 imagePullSecrets: []

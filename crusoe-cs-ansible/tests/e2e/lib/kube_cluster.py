@@ -254,6 +254,39 @@ class KubeCluster(Cluster):
     def delete(self, resource: str, name: str, namespace: str) -> None:
         self._cli.delete(resource, name, namespace)
 
+    def daemonset(self, name: str, namespace: str) -> dict:
+        """A DaemonSet as a kubectl-shaped dict — the wire form the
+        callers assert against (status.desiredNumberScheduled)."""
+        from kubernetes import client
+
+        ds = client.AppsV1Api(self._api.api_client).read_namespaced_daemon_set(
+            name=name, namespace=namespace
+        )
+        return self._wire.sanitize_for_serialization(ds)
+
+    def scale_daemonset_to_zero(self, name: str, namespace: str) -> None:
+        """Drain a DaemonSet deterministically.
+
+        A DaemonSet has NO replicas field (node-count-driven) and no
+        scale subresource — kubectl scale fails NotFound and
+        spec.replicas is silently dropped. The drain is a
+        nodeSelector no node carries.
+        """
+        from kubernetes import client
+
+        body = {
+            "spec": {
+                "template": {
+                    "spec": {"nodeSelector": {"crusoe-mitigator-scale-down": "true"}}
+                }
+            }
+        }
+        # _api is a CoreV1Api; the Apps API shares its api_client
+        # (the same loaded kubeconfig, immune to context switches).
+        client.AppsV1Api(self._api.api_client).patch_namespaced_daemon_set(
+            name=name, namespace=namespace, body=body
+        )
+
     # --- the scheduling math (unchanged — pure dict work) ----------------
     def free_cpu_millicores(
         self, node: str, pods: Iterable[dict], nodes: list[dict] | None = None

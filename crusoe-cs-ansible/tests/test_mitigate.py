@@ -404,6 +404,310 @@ class TestNodeModeWatcher:
         assert len(runs) == 2
         assert clock["t"] < 100 + 3600
 
+    def test_flip_during_a_run_is_not_swallowed(self, mitigate, monkeypatch):
+        # FOUND LIVE on CMK (the label-flip phase): a flip landing
+        # DURING a run is cleared by the post-run _mode_event.clear()
+        # without ever being consumed — the node stays in the OLD
+        # mode for up to the full interval. The clear must happen
+        # BEFORE the runs, so an event arriving mid-run stays set and
+        # forces the next pass.
+        runs = []
+
+        class FakeWatcher:
+            def __init__(self, *a):
+                pass
+
+            def start(self):
+                pass
+
+        monkeypatch.setattr(mitigate, "NodeModeWatcher", FakeWatcher)
+        monkeypatch.setattr(mitigate, "MODE_WATCH", True)
+        monkeypatch.setattr(mitigate, "NODE_MODE_LABEL", "some/label")
+        monkeypatch.setattr(mitigate, "NODE_NAME", "node-1")
+        monkeypatch.setattr(mitigate, "MITIGATIONS_ENV", "sched|wrapper.yml||3600")
+
+        clock = {"t": 100.0}
+
+        def fake_run(name, playbook, argv):
+            runs.append(name)
+            # The flip lands MID-RUN (the watcher fires while the
+            # playbook is executing — the live timeline: the enforce
+            # flip at 00:05:58 landed while the observe run was in
+            # flight).
+            mitigate._mode_event.set()
+            if len(runs) >= 2:
+                raise mitigate._StopLoop()
+            return 0
+
+        monkeypatch.setattr(mitigate, "run_mitigation", fake_run)
+        monkeypatch.setattr(mitigate.time, "monotonic", lambda: clock["t"])
+        monkeypatch.setattr(
+            mitigate.time, "sleep", lambda s: clock.__setitem__("t", clock["t"] + s)
+        )
+        with pytest.raises(mitigate._StopLoop):
+            mitigate.main()
+        # The mid-run flip must force a SECOND run immediately —
+        # not 3600s later. (With the post-run clear, the event is
+        # swallowed and the second run never happens before the
+        # interval: the loop sleeps the full hour.)
+        assert len(runs) == 2, (
+            "a mode flip landing during a run must force an immediate "
+            "re-run — the post-run clear swallows it and the node stays "
+            "in the old mode for up to the interval"
+        )
+        assert clock["t"] < 100 + 3600
+
+
+class TestModeEventMatrix:
+    """The mode event's full condition matrix.
+
+    The event is consumed BEFORE the runs (clear-then-run). Every
+    interaction of {when the flip lands} × {what is scheduled} ×
+    {run outcome} has a contract, and each contract has a test:
+    the mid-run flip (found live on CMK), the once-only-only config,
+    the mixed config, the failed-run backoff, and the drain.
+    """
+
+    def _harness(self, mitigate, monkeypatch, env, run_impl):
+        """Wire main() with a fake watcher, a fake clock, and the
+        given run_mitigation; return the (runs, clock) the test
+        asserts against."""
+        runs = []
+
+        class FakeWatcher:
+            def __init__(self, *a):
+                pass
+
+            def start(self):
+                pass
+
+        monkeypatch.setattr(mitigate, "NodeModeWatcher", FakeWatcher)
+        monkeypatch.setattr(mitigate, "MODE_WATCH", True)
+        monkeypatch.setattr(mitigate, "NODE_MODE_LABEL", "some/label")
+        monkeypatch.setattr(mitigate, "NODE_NAME", "node-1")
+        monkeypatch.setattr(mitigate, "MITIGATIONS_ENV", env)
+        clock = {"t": 100.0}
+
+        def fake_run(name, playbook, argv):
+            runs.append(name)
+            rc = run_impl(name, runs, clock)
+            if len(runs) >= 99:
+                raise mitigate._StopLoop()
+            return rc
+
+        monkeypatch.setattr(mitigate, "run_mitigation", fake_run)
+        monkeypatch.setattr(mitigate.time, "monotonic", lambda: clock["t"])
+        monkeypatch.setattr(
+            mitigate.time, "sleep", lambda s: clock.__setitem__("t", clock["t"] + s)
+        )
+        return runs, clock
+
+    def test_flip_during_a_run_forces_the_next_pass(self, mitigate, monkeypatch):
+        # THE LIVE BUG: the flip lands mid-run; the next pass must
+        # run immediately (not after the 3600s interval).
+        def flip_mid_run(name, runs, clock):
+            mitigate._mode_event.set()
+            if len(runs) >= 2:
+                raise mitigate._StopLoop()
+            return 0
+
+        runs, clock = self._harness(
+            mitigate, monkeypatch, "sched|wrapper.yml||3600", flip_mid_run
+        )
+        with pytest.raises(mitigate._StopLoop):
+            mitigate.main()
+        assert len(runs) == 2, "the mid-run flip must force an immediate re-run"
+        assert clock["t"] < 100 + 3600
+
+    def test_flip_between_runs_forces_the_next_pass(self, mitigate, monkeypatch):
+        # The flip lands while the scheduler SLEEPS (the common case
+        # — the run finished, the loop is parked): the event wakes
+        # the sleep and forces the run.
+        def flip_in_sleep(name, runs, clock):
+            if len(runs) >= 2:
+                raise mitigate._StopLoop()
+            return 0
+
+        runs, clock = self._harness(
+            mitigate, monkeypatch, "sched|wrapper.yml||3600", flip_in_sleep
+        )
+        real_sleep = mitigate.time.sleep
+
+        def sleep_then_flip(s):
+            # The first sleep is the post-initial-run park: flip
+            # DURING it (the watcher thread's real timing).
+            mitigate._mode_event.set()
+            real_sleep(s)
+
+        monkeypatch.setattr(mitigate.time, "sleep", sleep_then_flip)
+        with pytest.raises(mitigate._StopLoop):
+            mitigate.main()
+        assert len(runs) == 2, "the between-runs flip must force an immediate re-run"
+        assert clock["t"] < 100 + 3600
+
+    def test_once_only_only_config_keeps_the_event(self, mitigate, monkeypatch):
+        # No scheduled mitigation exists to consume the event — the
+        # clear is gated on `scheduled`, so the event STAYS set for
+        # a scheduled entry a future chart upgrade adds. (The
+        # unconditional clear lost the flip in once-only configs.)
+        seen = {"cleared_during_once_only": False}
+
+        def probe(name, runs, clock):
+            # The once-only run happened; the event must still be
+            # SET at this point (nothing consumed it).
+            seen["cleared_during_once_only"] = not mitigate._mode_event.is_set()
+            raise mitigate._StopLoop()
+
+        runs, clock = self._harness(mitigate, monkeypatch, "once|wrapper.yml||0", probe)
+        mitigate._mode_event.set()  # the flip, before main() parks
+        with pytest.raises(mitigate._StopLoop):
+            mitigate.main()
+        assert len(runs) == 1, "the once-only run executes"
+        assert not seen["cleared_during_once_only"], (
+            "an all-once-only config must NOT clear the mode event — "
+            "a future scheduled entry must still see the flip"
+        )
+
+    def test_mixed_config_the_flip_forces_only_the_scheduled(
+        self, mitigate, monkeypatch
+    ):
+        # A once-only + a scheduled entry: the event forces the
+        # SCHEDULED one due now; the once-only (already succeeded)
+        # must NOT re-run — the event is not a blanket re-run signal.
+        def flip_once(name, runs, clock):
+            mitigate._mode_event.set()
+            if len(runs) >= 3:
+                raise mitigate._StopLoop()
+            return 0
+
+        runs, clock = self._harness(
+            mitigate,
+            monkeypatch,
+            "once|wrapper-once.yml||0\nsched|wrapper.yml||3600",
+            flip_once,
+        )
+        with pytest.raises(mitigate._StopLoop):
+            mitigate.main()
+        # once runs first (initial pass), sched runs (initial), then
+        # the mid-run flip forces sched again — once does NOT repeat.
+        assert runs == ["once", "sched", "sched"], (
+            "the mode event forces scheduled runs only — a succeeded "
+            "once-only must not re-run"
+        )
+
+    def test_flip_during_a_failed_run_still_backs_off(self, mitigate, monkeypatch):
+        # The flip forces the run due NOW, but the run FAILS: the
+        # failure backoff still paces the RETRY (the event is not a
+        # retry-now signal that bypasses the backoff — that would
+        # burn the CrashLoop strikes in one blip).
+        attempts = {"n": 0}
+
+        def fail_with_flip(name, runs, clock):
+            attempts["n"] += 1
+            mitigate._mode_event.set()
+            if attempts["n"] >= 2:
+                raise mitigate._StopLoop()
+            return 1  # fail
+
+        runs, clock = self._harness(
+            mitigate, monkeypatch, "sched|wrapper.yml||3600", fail_with_flip
+        )
+        monkeypatch.setattr(mitigate, "FAILURE_RETRY_BASE_SECONDS", 60)
+        with pytest.raises(mitigate._StopLoop):
+            mitigate.main()
+        assert attempts["n"] == 2, "the failed run retries (not fatal at 1 strike)"
+        # The retry is paced by the backoff (60s base), NOT immediate
+        # — even though the event fired during the failed run.
+        assert clock["t"] >= 100 + 60, (
+            "the mode event must not bypass the failure backoff — the "
+            "retry is paced from the attempt"
+        )
+
+    def test_flip_during_drain_does_not_restart_runs(self, mitigate, monkeypatch):
+        # SIGTERM sets draining; a flip landing mid-drain must not
+        # resurrect the loop — the drain wins, the pod exits 0.
+        def flip_and_drain(name, runs, clock):
+            mitigate._mode_event.set()
+            import os
+
+            os.kill(os.getpid(), mitigate.signal.SIGTERM)
+            return 0
+
+        runs, clock = self._harness(
+            mitigate, monkeypatch, "sched|wrapper.yml||3600", flip_and_drain
+        )
+        rc = mitigate.main()
+        assert rc == 0, "the drain exits 0"
+        assert len(runs) == 1, "no run starts after the drain"
+
+
+class TestSleepSlices:
+    """The drain's wake contract.
+
+    PEP 475 restarts time.sleep after a signal handler runs, so a
+    single long sleep would not notice the drain flag until it
+    completed — well past the pod's grace period. sleep_slices chops
+    the wait into <=1s slices so the SIGTERM lands within one slice.
+    """
+
+    def test_sigterm_mid_sleep_wakes_within_one_slice(self, mitigate, monkeypatch):
+        # The contract: a drain flag raised MID-SLEEP returns within
+        # one slice (<=1s of additional sleep), not after the full
+        # wait. Simulated at the slice level: the flag flips during
+        # the second slice; the third slice must not happen.
+        clock = {"t": 0.0}
+        slices = []
+        draining = {"flag": False}
+
+        def fake_sleep(s):
+            slices.append(s)
+            clock["t"] += s
+            # The SIGTERM handler runs during the SECOND slice.
+            if len(slices) == 2:
+                draining["flag"] = True
+
+        monkeypatch.setattr(mitigate.time, "monotonic", lambda: clock["t"])
+        monkeypatch.setattr(mitigate.time, "sleep", fake_sleep)
+
+        mitigate.sleep_slices(3600.0, lambda: draining["flag"])
+        # Woke after the second slice — not 3600 slices, not the full
+        # hour: the drain is noticed within one slice of the signal.
+        assert len(slices) == 2, (
+            f"the drain flag must wake the sleep within one slice, "
+            f"slept {len(slices)} slices"
+        )
+        assert clock["t"] <= 2.0
+
+    def test_no_slice_sleeps_past_the_deadline(self, mitigate, monkeypatch):
+        # Every slice is <=1s (or the remainder): a 2.5s wait is
+        # 1s + 1s + 0.5s — never one 2.5s sleep (which would miss a
+        # signal landing in the middle for the full duration).
+        clock = {"t": 0.0}
+        slices = []
+
+        def fake_sleep(s):
+            slices.append(s)
+            clock["t"] += s
+
+        monkeypatch.setattr(mitigate.time, "monotonic", lambda: clock["t"])
+        monkeypatch.setattr(mitigate.time, "sleep", fake_sleep)
+
+        mitigate.sleep_slices(2.5, lambda: False)
+        assert slices == [1.0, 1.0, 0.5], f"every slice must be <=1s, got {slices}"
+
+    def test_wake_flag_set_before_the_sleep_returns_immediately(
+        self, mitigate, monkeypatch
+    ):
+        # The flag already set (SIGTERM before the park): no slice at
+        # all — the drain must not cost even one second. monkeypatch,
+        # NOT a bare assignment: mitigate.time is the process-wide
+        # time module, and a bare assignment poisons every later
+        # test in the session with a no-op sleep.
+        called = []
+        monkeypatch.setattr(mitigate.time, "sleep", lambda s: called.append(s))
+        mitigate.sleep_slices(3600.0, lambda: True)
+        assert called == [], "a pre-set wake flag must not sleep at all"
+
 
 class TestScheduler:
     def test_once_only_is_due_only_before_first_success(self, mitigate):

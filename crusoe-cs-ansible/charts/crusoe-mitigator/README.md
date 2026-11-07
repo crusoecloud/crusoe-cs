@@ -80,11 +80,71 @@ R1/R2/R3 rollback ladder: the
 Any enabled mitigation with `metrics: true` (default) renders the
 **metrics-server sidecar**: a tiny HTTP server (baked into the image)
 serving every `*.prom` in the chart hostPath
-(`/var/lib/crusoe-mitigator`) on `:19698`. The pod carries
+(`/var/lib/crusoe-mitigator`) on `:19698`.
+
+> **The metrics port is unauthenticated.** With `hostNetwork: true`
+> the pod shares the node's network namespace, so the bind address
+> decides who can reach it. It defaults to the node's **internal**
+> address (`status.hostIP`) — vmagent scrapes the pod IP, which under
+> hostNetwork IS that address, so the scrape works while the public
+> interface stays closed.
+>
+> Setting `metricsBind: "0.0.0.0"` re-exposes it on the node's public
+> interface wherever the provider firewall allows it. The exposition
+> includes per-namespace series. Firewall `:19698` to the scraper if
+> you override it.
+>
+> **Node-local consumers don't need the HTTP hop at all:** the `.prom`
+> files live in the hostPath (`/var/lib/crusoe-mitigator`), so a host
+> agent can read them directly — the node_exporter textfile-collector
+> pattern. That covers the loopback case without a second listener.
+>
+> The bind address decides which **interfaces** listen — and for a
+> `hostNetwork: true` pod that is the only reliable control.
+> Kubernetes NetworkPolicy behaviour on hostNetwork pods is
+> undefined; common CNIs treat that traffic as node traffic and
+> ignore podSelector policies, so a policy here would promise a
+> restriction it cannot deliver. Firewall `:19698` at the provider
+> level if you need peer restrictions.
+
+The pod carries
 `prometheus.io/scrape` annotations, so the cluster's existing scrape
 path picks it up with zero config changes (vmagent's `kubernetes-pods`
 job on Crusoe; set `metricsBackend: gmp` to render a `PodMonitoring`
 CR for GKE managed collection instead — same port, same exposition).
+
+### Overriding a mitigation's vars (the values-file shape)
+
+Helm's `--set mitigations[0]...` **replaces the list element
+wholesale** — dropping `name`/`playbook`/`enabled` and silently
+disabling the mitigation. The safe override is a values FILE that
+re-declares the entry with the one var changed. Copy-paste snippet
+(the metrics timer cadence as the example — role default 60s; the
+timer is the host-side consumer and only affects SSH/bare-VM
+delivery: the pod-native chart image (alpine) ships no `systemctl`,
+so the timer never installs in chart deployments — the reconciler's
+10s republish owns host-series freshness there and this var is
+inert; on bare VMs it sets the timer's cadence):
+
+```yaml
+mitigations:
+  - name: cve-2026-98432
+    enabled: true
+    playbook: wrapper-cve-2026-98432-pod.yml
+    interval: 3600
+    vars:
+      cve_2026_98432_run_probe: "true"
+      cve_2026_98432_metrics: "true"
+      cve_2026_98432_fail_on_unsupported_family: "true"
+      cve_2026_98432_metrics_interval_seconds: "10"
+    sidecar:
+      command: /usr/local/sbin/cve-2026-98432-netns-reconcile.py
+      interval: 10
+```
+
+```bash
+helm upgrade crusoe-mitigator charts/crusoe-mitigator -n crusoe-mitigator -f your-values.yaml
+```
 
 ## Delivery: pod-native
 
@@ -148,7 +208,9 @@ cve-2026-98432 mitigation enabled.
 | `mitigations` | cve-2026-98432 on, emudhra-ca off | The list of mitigations to run (see below) |
 | `journaldLogging` | `true` | Structured events to the host journal (Managed Logs console: `SYSLOG_IDENTIFIER=crusoe-mitigator`) |
 | `nodeSelector` | `{}` | Restrict to specific nodes |
-| `tolerations` | `[]` | Schedule on tainted nodes |
+| `tolerations` | `[]` | Taints the mitigator tolerates. **Empty by default — check your fleet:** a DaemonSet with no tolerations stays off every tainted node, GPU nodes are usually tainted, and nothing reports the gap (`kubectl get nodes -o custom-columns='NAME:.metadata.name,TAINTS:.spec.taints'`). Opt in with `tolerations: [{operator: Exists}]` to cover tainted nodes; scope it with a `key` if tolerating everything (including control-plane taints) is too broad |
+| `metricsPort` | `19698` | The metrics server's port |
+| `metricsBind` | `""` (the node's internal IP) | Which interface the metrics server listens on. **Two choices only:** `""` = `status.hostIP`, resolved per node (public interface closed); `"0.0.0.0"` = all interfaces. Anything else fails the render — a literal IP is a per-node address in a DaemonSet-wide setting, and `127.0.0.1` breaks scraping |
 
 ### Adding a mitigation
 

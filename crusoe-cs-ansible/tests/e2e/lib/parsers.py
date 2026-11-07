@@ -1,7 +1,7 @@
 """Pure parsers for the outputs the live cluster produces.
 
 Pure functions: canned output in, structured value out. Every
-live-found parsing trap lives here, unit-tested:
+parsing trap lives here, unit-tested:
   - the prom anchor (HELP/TYPE lines contain the family names; a
     bare grep picks up 'gauge' from the TYPE line as the value)
   - the nft counter (the rule's own match count — the evidence)
@@ -15,8 +15,10 @@ from __future__ import annotations
 import datetime as dt
 import re
 
-# nft: "counter packets 6 bytes 368" — the packets field.
-NFT_COUNTER_RE = re.compile(r"counter packets (\d+)")
+# nft: "counter packets 6 bytes 368" — the packets field. Anchored on
+# the VERDICT rule (drop / log prefix): the loopback split renders a
+# count-only rule FIRST whose counter must not be read here.
+NFT_COUNTER_RE = re.compile(r"counter packets (\d+) bytes \d+[^\n]*(?:drop|log prefix)")
 
 # readlink /proc/<pid>/ns/net -> "net:[4026533106]"
 NETNS_INODE_RE = re.compile(r"\[(\d+)\]")
@@ -24,7 +26,7 @@ NETNS_INODE_RE = re.compile(r"\[(\d+)\]")
 # The install line carries "(pod <name>)" whenever the name resolves
 # (the sweep path, or a late first-sight retry) — the regex accepts
 # the OPTIONAL pod part or a HEALTHY node reads as a regression
-# (found by review).
+# .
 INSTALL_LINE_RE = r"netns {netns}( \(pod [^)]*\))?: rule installed"
 
 # The proc-scan fallback line: "netns proc/<pid> (pod <name>)".
@@ -50,8 +52,7 @@ def prom_value(prom_text: str, family: str, *label_filters: str) -> str | None:
 
     The anchor matters: the prom file's HELP/TYPE lines also contain
     the family names, and a bare grep picks up 'gauge' from the TYPE
-    line as the value (found live: seen=gauge covered=gauge on a
-    fully-covered node).
+    line as the value.
     """
     for line in prom_text.splitlines():
         if not line.startswith(family):
@@ -85,7 +86,7 @@ def parse_rfc3339(timestamp: str) -> dt.datetime:
     """Parse an RFC3339 timestamp in EITHER wire form: kubectl's
     trailing-Z ('2026-11-03T07:25:41Z') or the python client's
     offset form ('2026-11-03T07:25:41+00:00') — the two transports
-    serialize the same instant differently (found live)."""
+    serialize the same instant differently."""
     ts = timestamp.strip()
     if ts.endswith("Z"):
         ts = ts[:-1] + "+00:00"

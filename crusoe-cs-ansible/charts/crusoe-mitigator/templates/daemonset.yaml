@@ -27,6 +27,12 @@ spec:
     metadata:
       labels:
         app: {{ .Release.Name }}
+        # Version identity on the POD: vmagent's kubernetes-pods relabel
+        # promotes pod labels to series labels, so this puts the exact
+        # chart version on every cve_2026_98432_* series (the version
+        # tracking the fleet dashboard needs). The DaemonSet object's
+        # helm.sh/chart label never reaches the scraped series.
+        helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version }}
       {{- if $metricsEnabled }}
       annotations:
         # vmagent's kubernetes-pods discovery job auto-scrapes annotated
@@ -72,6 +78,11 @@ spec:
       # starts) — a mid-template-write SIGKILL would leave a
       # half-written ruleset file for the restart to repair.
       terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds | default 10 }}
+      {{- if .Values.priorityClassName }}
+      # BestEffort pods are evicted first under memory pressure; while
+      # the pod is gone its netns reconciler isn't running.
+      priorityClassName: {{ .Values.priorityClassName }}
+      {{- end }}
       {{- if $hasSidecar }}
       # Sidecars walk /proc for pod netns inodes; they need the HOST's
       # PID namespace to see container processes.
@@ -143,13 +154,24 @@ spec:
             # socket is absent.
             - name: ANSIBLE_CALLBACKS_ENABLED
               value: journald_syslog
+            # The CALLBACK directory, not its parent: the parent also
+            # holds module_utils/, and Ansible scans every .py under
+            # the configured path as a callback — it then warns on
+            # every run that module_utils/journald.py "seems to be
+            # invalid" (it is a helper, not a callback).
             - name: ANSIBLE_CALLBACK_PLUGINS
-              value: /opt/ansible/plugins
+              value: /opt/ansible/plugins/callback
             - name: ANSIBLE_JOURNALD_IDENTIFIER
               value: crusoe-mitigator
             {{- end }}
           command:
             - /usr/local/sbin/mitigate.py
+          {{- with (.Values.resources | default dict).mitigator }}
+          # Requests move the pod out of BestEffort (first-evicted
+          # class); limits cap it.
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           volumeMounts:
             # HostToContainer (rslave): the reconciler enters pod netns
             # via the /run/netns/<id> bind mounts the CNI creates
@@ -237,6 +259,10 @@ spec:
             {{- end }}
           command:
             - {{ .sidecar.command }}
+          {{- with ($.Values.resources | default dict).reconciler }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           volumeMounts:
             # Sidecars chroot to /host for host tooling and walk /proc
             # (hostPID gives them the host's PID namespace).
@@ -277,6 +303,16 @@ spec:
           {{- end }}
           securityContext:
             runAsUser: 0
+          env:
+            # The node's INTERNAL address — the metrics server's
+            # default bind. $(VAR) expansion in command/args sees only
+            # THIS container's env, so the env must be declared here,
+            # in the container that references it.
+            - name: STATUS_HOST_IP
+              valueFrom:
+                fieldRef:
+                  apiVersion: v1
+                  fieldPath: status.hostIP
           command:
             - python3
             - /usr/local/sbin/serve-metrics.py
@@ -284,6 +320,32 @@ spec:
             - {{ .Values.metricsDir | default "/var/lib/crusoe-mitigator" }}
             - --port
             - {{ .Values.metricsPort | default 19698 | quote }}
+            # Bind to the node's INTERNAL address by default. With
+            # hostNetwork the pod shares the node's namespace, so
+            # 0.0.0.0 would also listen on the node's PUBLIC interface
+            # wherever the provider firewall allows it — an
+            # unauthenticated endpoint exposing per-namespace series.
+            # vmagent scrapes the pod IP, which under hostNetwork IS
+            # this address, so the scrape keeps working.
+            #
+            # Only two values are meaningful, because this is a
+            # DaemonSet-wide setting that must resolve PER NODE:
+            #   ""         the node's own internal IP (default)
+            #   "0.0.0.0"  all interfaces
+            # A literal IP would make every node bind the same address
+            # and all but one fail with "address not available"; a
+            # loopback bind would break the scrape (vmagent targets the
+            # pod IP). Both fail the render rather than break a fleet.
+            {{- $bind := .Values.metricsBind | default "" }}
+            {{- if not (has $bind (list "" "0.0.0.0")) }}
+            {{- fail (printf "metricsBind must be \"\" (the node's internal IP) or \"0.0.0.0\"; got %q. A literal IP is a per-node address in a DaemonSet-wide setting, and 127.0.0.1 breaks scraping." $bind) }}
+            {{- end }}
+            - --bind
+            - {{ $bind | default "$(STATUS_HOST_IP)" | quote }}
+          {{- with (.Values.resources | default dict).metricsServer }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           volumeMounts:
             # The generators (metrics.sh per mitigation, the pod-netns
             # reconciler) write *.prom files here; this sidecar serves

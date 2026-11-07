@@ -27,6 +27,12 @@ fi
 
 fail=0
 
+# The Jinja-escape lint: C-string escapes (\b \n \t \r) inside a
+# Jinja block are unescaped by Jinja's lexer — a regex written inline
+# silently becomes a different regex. Fast (<0.1s); runs before the
+# heavier gates.
+run python3 scripts/jinja_escape_lint.py || fail=1
+
 run $RUFF format --check images/ roles/cve_2026_98432/files/ scripts/ tests/ || fail=1
 run $RUFF check --no-fix images/ roles/cve_2026_98432/files/ scripts/ tests/ || fail=1
 run $MYPY images/ roles/cve_2026_98432/files/ scripts/ tests/ || fail=1
