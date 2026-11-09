@@ -12,19 +12,20 @@
 #    The assembled ref MUST be digest-pinned (@sha256:...); the chart
 #    fails loudly if nothing resolves.
 #
-#    The default digest is the 35e4e8f build (the fresh-pod netns
-#    gap fix: mountPropagation HostToContainer on both /host mounts,
-#    visible EINVAL diagnosis via the two mountinfo views, targeted
-#    inotify install, pod names on every netns log line, deferred
-#    names, nameless-set pruning) — published to GHCR by the main
-#    pipeline. Re-pin on each release: the ansible-image:build job
-#    output prints the digest to pin here.
+#    The default digest is the cefb707 build (the customer-feedback
+#    release: the raw-socket probe (no inet_opt on the client path),
+#    counter preservation via generation signatures, the reconciler's
+#    10s host republish, priorityClassName/resources/tolerations,
+#    metricsBind, the mode-event mid-run flip fix, the mktemp 0644
+#    publish) — published to GHCR by the main pipeline. Re-pin on
+#    each release: the ansible-image:build job output prints the
+#    digest to pin here.
 image:
   # Explicit full image reference (overrides registry/repository/digest).
   full: ""
   registry: ghcr.io/crusoecloud
   repository: crusoe-cs/ansible
-  digest: sha256:c6dae185618d74a7bde58a94efcfb8a00d1c4c1cd02332fc1fd3b091d31c3b81
+  digest: sha256:2bbe2bb8ec55988d2f0177134d2fe4b671789cda8a4973f16561511049b9a743
   # IfNotPresent is the REGISTRY-path default (the default image IS
   # a registry ref — a Never default with a registry image is the
   # ErrImageNeverPull/ImagePullBackOff trap, found live on both
